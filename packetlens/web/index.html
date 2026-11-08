@@ -16,7 +16,7 @@
               stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
       <span class="brand-name">PacketLens</span>
-      <span class="step-tag">Step 1 · Devices</span>
+      <span class="step-tag">Step 2 · Packets</span>
     </div>
     <div class="status" id="status"><span class="status-dot"></span><span id="status-text">Connecting…</span></div>
     <button id="scan-btn" class="btn" disabled>Rescan network</button>
@@ -48,12 +48,37 @@
           <h2>Live topology</h2>
           <ul class="legend">
             <li><span class="swatch router"></span>Router</li>
-            <li><span class="swatch self"></span>This Mac</li>
-            <li><span class="swatch existing"></span>Already connected</li>
-            <li><span class="swatch joined"></span>Newly joined</li>
+            <li><span class="swatch self"></span>You</li>
+            <li title="Already connected when PacketLens started"><span class="swatch existing"></span>Existing</li>
+            <li title="Seen joining via DHCP"><span class="swatch joined"></span>Joined</li>
           </ul>
         </div>
         <svg id="topo" role="img" aria-label="Network topology"></svg>
+      </div>
+
+      <div class="card packets-card">
+        <div class="card-head">
+          <h2>Live packets <span class="count" id="packet-count">0</span></h2>
+          <div class="packet-tools">
+            <input id="pkt-filter" type="search" spellcheck="false" autocomplete="off"
+                   placeholder="Filter: dns, tcp, 192.168.1.5…" aria-label="Filter packets">
+            <button id="pause-btn" class="btn small" title="Stop adding new rows (capture keeps running)">Pause</button>
+            <button id="clear-btn" class="btn small" title="Clear the table">Clear</button>
+          </div>
+        </div>
+        <div class="table-wrap" id="table-wrap">
+          <table class="packets">
+            <colgroup>
+              <col class="c-no"><col class="c-time"><col class="c-addr"><col class="c-addr">
+              <col class="c-proto"><col class="c-len"><col>
+            </colgroup>
+            <thead>
+              <tr><th>No.</th><th>Time</th><th>Source</th><th>Destination</th><th>Protocol</th><th>Length</th><th>Info</th></tr>
+            </thead>
+            <tbody id="packet-rows"></tbody>
+          </table>
+          <p class="table-empty" id="table-empty">Waiting for packets…</p>
+        </div>
       </div>
 
       <div class="card log-card">
@@ -62,6 +87,14 @@
           <span class="hint">DHCP and ARP steps, newest first</span>
         </div>
         <ol class="log" id="log"></ol>
+      </div>
+
+      <div class="card detail-card">
+        <div class="card-head">
+          <h2>Packet details</h2>
+          <span class="hint" id="detail-hint">Click a packet to decode it</span>
+        </div>
+        <div class="detail" id="detail"></div>
       </div>
     </section>
   </main>

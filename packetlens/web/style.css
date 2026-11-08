@@ -99,13 +99,25 @@ body {
 /* ---------- layout ---------- */
 .layout {
   display: grid;
-  grid-template-columns: 340px 1fr;
+  grid-template-columns: 300px 1fr;
   gap: 16px;
   padding: 16px;
   min-height: 0;
 }
 .sidebar { display: flex; flex-direction: column; gap: 16px; min-height: 0; }
-.stage { display: grid; grid-template-rows: 1fr 230px; gap: 16px; min-height: 0; min-width: 0; }
+.stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr);
+  grid-template-rows: minmax(0, 1fr) 270px;
+  grid-template-areas: "topo packets" "log detail";
+  gap: 16px;
+  min-height: 0;
+  min-width: 0;
+}
+.topo-card { grid-area: topo; }
+.packets-card { grid-area: packets; }
+.log-card { grid-area: log; }
+.detail-card { grid-area: detail; }
 
 .card {
   background: var(--panel);
@@ -191,6 +203,8 @@ body {
   100% { transform: scale(2); opacity: 0; }
 }
 .topo-hint { font-size: 13px; fill: var(--faint); }
+#topo.compact .node .sub { display: none; }
+.topo-card .card-head h2 { white-space: nowrap; }
 
 /* ---------- log ---------- */
 .log-card { display: flex; flex-direction: column; min-height: 0; }
@@ -206,6 +220,80 @@ body {
 .log .warn .msg { color: var(--warn); }
 .log .empty { display: block; color: var(--faint); border: 0; }
 
+/* ---------- packet table ---------- */
+.packets-card { display: flex; flex-direction: column; min-height: 0; padding-bottom: 8px; }
+.packets-card .card-head { flex-wrap: wrap; }
+.packet-tools { display: flex; gap: 6px; align-items: center; flex: 1; justify-content: flex-end; min-width: 220px; }
+#pkt-filter {
+  font: 13px var(--mono); flex: 1; max-width: 260px; min-width: 120px;
+  padding: 5px 9px; border-radius: 7px; border: 1px solid var(--border);
+  background: var(--panel-2); color: var(--text);
+}
+#pkt-filter:focus { outline: 2px solid color-mix(in srgb, var(--existing) 50%, transparent); outline-offset: 0; }
+.btn.small { padding: 5px 10px; font-size: 12px; }
+.btn.active { border-color: var(--router); color: var(--router); }
+
+.table-wrap { flex: 1; overflow: auto; min-height: 0; margin: 0 -16px; position: relative; }
+table.packets { width: 100%; border-collapse: collapse; table-layout: fixed; font: 12px/1.3 var(--mono); }
+.packets col.c-no { width: 52px; }
+.packets col.c-time { width: 70px; }
+.packets col.c-addr { width: 122px; }
+.packets col.c-proto { width: 62px; }
+.packets col.c-len { width: 50px; }
+.packets thead th {
+  position: sticky; top: 0; z-index: 1; background: var(--panel);
+  text-align: left; font: 600 11px -apple-system, BlinkMacSystemFont, sans-serif;
+  color: var(--muted); padding: 6px 6px; border-bottom: 1px solid var(--border);
+}
+.packets td { padding: 3px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.packets th:first-child, .packets td:first-child { padding-left: 16px; }
+.packets tbody tr { cursor: pointer; border-bottom: 1px solid var(--panel-2); }
+.packets tbody tr:hover { background: var(--panel-2); }
+.packets tbody tr.selected { background: color-mix(in srgb, var(--existing) 22%, var(--panel)); }
+.packets td.num { color: var(--faint); }
+.packets tr.hidden { display: none; }
+.table-empty { color: var(--faint); font-size: 13px; padding: 12px 16px; margin: 0; }
+
+/* protocol colours (a small nod to Wireshark's colouring rules) */
+.proto { display: inline-block; padding: 0 5px; border-radius: 4px; font-weight: 600; --c: var(--muted);
+         color: var(--c); background: color-mix(in srgb, var(--c) 14%, transparent); }
+.proto.p-arp { --c: #b7791f; }
+.proto.p-dhcp { --c: var(--joined); }
+.proto.p-dns, .proto.p-mdns, .proto.p-llmnr { --c: #2b6cb0; }
+.proto.p-tcp { --c: #7c3aed; }
+.proto.p-http { --c: #c026d3; }
+.proto.p-tls, .proto.p-quic { --c: #0f766e; }
+.proto.p-udp, .proto.p-ssdp, .proto.p-ntp { --c: #0e7490; }
+.proto.p-icmp, .proto.p-icmpv6 { --c: #db2777; }
+.proto.p-eapol { --c: var(--warn); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .proto.p-arp { --c: #f6c454; }
+  :root:not([data-theme="light"]) .proto.p-dns,
+  :root:not([data-theme="light"]) .proto.p-mdns,
+  :root:not([data-theme="light"]) .proto.p-llmnr { --c: #63b3ed; }
+  :root:not([data-theme="light"]) .proto.p-tcp { --c: #b794f4; }
+  :root:not([data-theme="light"]) .proto.p-http { --c: #f472b6; }
+  :root:not([data-theme="light"]) .proto.p-tls,
+  :root:not([data-theme="light"]) .proto.p-quic { --c: #5eead4; }
+  :root:not([data-theme="light"]) .proto.p-udp,
+  :root:not([data-theme="light"]) .proto.p-ssdp,
+  :root:not([data-theme="light"]) .proto.p-ntp { --c: #67e8f9; }
+  :root:not([data-theme="light"]) .proto.p-icmp,
+  :root:not([data-theme="light"]) .proto.p-icmpv6 { --c: #f9a8d4; }
+}
+
+/* ---------- packet details ---------- */
+.detail-card { display: flex; flex-direction: column; min-height: 0; }
+.detail { flex: 1; overflow: auto; min-height: 0; font: 12px/1.45 var(--mono); }
+.detail .empty { color: var(--faint); font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 13px; }
+.detail details { border-bottom: 1px solid var(--panel-2); }
+.detail summary { cursor: pointer; padding: 3px 0; font-weight: 600; color: var(--text); }
+.detail summary::marker { color: var(--faint); }
+.detail dl { display: grid; grid-template-columns: minmax(90px, max-content) 1fr; gap: 1px 12px; margin: 2px 0 8px 18px; }
+.detail dt { color: var(--muted); }
+.detail dd { margin: 0; word-break: break-all; }
+.detail pre.hex { margin: 10px 0 0; color: var(--muted); white-space: pre; }
+
 /* ---------- toasts ---------- */
 .toasts { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 10; }
 .toast {
@@ -216,13 +304,22 @@ body {
 .toast strong { display: block; }
 @keyframes toast-in { from { transform: translateY(8px); opacity: 0; } }
 
-/* ---------- small screens ---------- */
-@media (max-width: 900px) {
+/* ---------- smaller screens ---------- */
+@media (max-width: 1250px) {
   body { height: auto; }
+  .stage {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 440px 460px 320px 260px;
+    grid-template-areas: "topo" "packets" "detail" "log";
+  }
+  .sidebar { max-height: calc(100vh - 90px); position: sticky; top: 16px; }
+}
+@media (max-width: 900px) {
   .topbar { flex-wrap: wrap; padding: 12px 16px; }
   .status { order: 3; width: 100%; }
   .layout { grid-template-columns: 1fr; padding: 16px; }
-  .stage { grid-template-rows: 440px 300px; }
+  .sidebar { max-height: none; position: static; }
   .device-list { max-height: 360px; }
   .legend { display: none; }
+  table.packets { min-width: 680px; }  /* scroll sideways inside the card, not the page */
 }

@@ -3,9 +3,12 @@
 Routes:
     GET  /              dashboard page
     GET  /static/<f>    css/js
-    GET  /api/state     current snapshot (JSON)
-    GET  /api/stream    live snapshots (Server-Sent Events)
-    POST /api/scan      start an ARP scan
+    GET  /api/state       current snapshot (JSON)
+    GET  /api/stream      live updates (Server-Sent Events):
+                            event "state"   - devices, log, status
+                            event "packets" - new packet rows since the last batch
+    GET  /api/packet/<n>  all layers + hex dump of packet number n
+    POST /api/scan        start an ARP scan
 
 It listens on 127.0.0.1 only, so nobody else on the Wi-Fi can open it.
 """
@@ -13,6 +16,7 @@ It listens on 127.0.0.1 only, so nobody else on the Wi-Fi can open it.
 from __future__ import annotations
 
 import json
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -21,7 +25,9 @@ from .engine import Engine
 WEB_DIR = Path(__file__).parent / "web"
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
                  ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml"}
-HEARTBEAT = 2.0  # seconds; also refreshes counters in the UI
+HEARTBEAT = 2.0        # seconds; also refreshes counters in the UI
+BATCH_INTERVAL = 0.25  # group packets into ~4 updates per second
+BACKLOG = 500          # packets a newly opened page gets straight away
 
 
 def make_handler(engine: Engine):
@@ -56,6 +62,12 @@ def make_handler(engine: Engine):
                 self._json(engine.snapshot())
             elif route == "/api/stream":
                 self._stream()
+            elif route.startswith("/api/packet/") and route[len("/api/packet/"):].isdigit():
+                detail = engine.packet_detail(int(route[len("/api/packet/"):]))
+                if detail is None:
+                    self._json({"error": "That packet is no longer in the buffer"}, 404)
+                else:
+                    self._json(detail)
             else:
                 self._send(404, b"Not found", "text/plain")
 
@@ -72,17 +84,30 @@ def make_handler(engine: Engine):
             self.send_header("Cache-Control", "no-store")
             self.send_header("Connection", "keep-alive")
             self.end_headers()
-            last = None
+            last_version, last_sent = None, 0.0
+            last_packet = max(engine.packet_seq - BACKLOG, 0)
             try:
                 while True:
                     with engine.cond:
-                        engine.cond.wait_for(lambda: engine.version != last, timeout=HEARTBEAT)
-                        last = engine.version
-                        payload = json.dumps(engine.snapshot())
-                    self.wfile.write(f"data: {payload}\n\n".encode())
+                        engine.cond.wait_for(lambda: engine.version != last_version
+                                             or engine.packet_seq != last_packet, timeout=HEARTBEAT)
+                        version, newest = engine.version, engine.packet_seq
+                    now = time.monotonic()
+                    if version != last_version or now - last_sent >= HEARTBEAT:
+                        self._event("state", engine.snapshot())
+                        last_version, last_sent = version, now
+                    if newest != last_packet:
+                        batch = engine.packets_since(last_packet)
+                        if batch:
+                            self._event("packets", batch)
+                        last_packet = batch[-1]["no"] if batch else newest
                     self.wfile.flush()
+                    time.sleep(BATCH_INTERVAL)
             except (BrokenPipeError, ConnectionResetError):
                 return
+
+        def _event(self, name: str, data) -> None:
+            self.wfile.write(f"event: {name}\ndata: {json.dumps(data)}\n\n".encode())
 
     return Handler
 

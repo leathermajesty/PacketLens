@@ -8,32 +8,38 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 
 from scapy.sendrecv import AsyncSniffer
 from scapy.utils import PcapReader
 
 from .netinfo import NetworkInfo, read_arp_table
+from .packets import dissect, summarize
 from .scanner import arp_scan
 from .tracker import DeviceTracker
 
-# Step 1 only needs DHCP (UDP 67/68) and ARP, so filter everything else in the kernel.
-CAPTURE_FILTER = "arp or (udp and (port 67 or port 68))"
+BUFFER_SIZE = 2000    # packets kept in memory for the table and the detail view
 MAX_REPLAY_GAP = 3.0  # don't wait longer than this between replayed packets
 
 
 class Engine:
     def __init__(self, net: NetworkInfo, source: str = "live", pcap_path: str | None = None,
-                 speed: float = 1.0):
+                 speed: float = 1.0, capture_filter: str | None = None):
         self.net = net
         self.source = source              # "live" | "pcap" | "demo"
         self.pcap_path = pcap_path
         self.speed = max(speed, 0.01)
+        self.capture_filter = capture_filter or None
         self.cond = threading.Condition(threading.RLock())
-        self.version = 0
+        self.version = 0                  # bumps when devices/log/status change
+        self.packet_seq = 0               # number of the newest packet
+        self.packets: deque = deque(maxlen=BUFFER_SIZE)   # (summary, scapy packet)
+        self._t0: float | None = None
         self.tracker = DeviceTracker(router_ip=net.gateway_ip, router_mac=net.gateway_mac,
                                      self_ip=net.ip, self_mac=net.mac, subnet=net.cidr)
         self.capture = {"running": False, "error": None, "packets": 0, "finished": False,
-                        "filter": CAPTURE_FILTER}
+                        "filter": self.capture_filter or "", "decode_errors": 0,
+                        "buffer": BUFFER_SIZE}
         self.scan = {"running": False, "error": None, "last_run": None, "found": 0}
         self._sniffer: AsyncSniffer | None = None
         self._stop = threading.Event()
@@ -47,9 +53,46 @@ class Engine:
 
     def _feed(self, pkt) -> None:
         with self.cond:
-            self.capture["packets"] += 1
-            if self.tracker.handle(pkt):
-                self._changed()
+            self.packet_seq += 1
+            no = self.packet_seq
+            ts = float(pkt.time)
+            if self._t0 is None:
+                self._t0 = ts
+            try:
+                summary = summarize(pkt, no)
+            except Exception as exc:  # noqa: BLE001 - one odd packet must not stop the capture
+                self.capture["decode_errors"] += 1
+                summary = {"no": no, "ts": ts, "src": "?", "dst": "?", "src_mac": None,
+                           "dst_mac": None, "proto": "?", "length": len(bytes(pkt)),
+                           "info": f"Could not decode: {exc}", "stack": ""}
+            summary["rel"] = ts - self._t0
+            self.packets.append((summary, pkt))
+            self.capture["packets"] = no
+            try:
+                if self.tracker.handle(pkt):
+                    self.version += 1
+            except Exception:  # noqa: BLE001
+                self.capture["decode_errors"] += 1
+            self.cond.notify_all()
+
+    def packets_since(self, after: int, limit: int = 500) -> list[dict]:
+        """Summaries of packets numbered above `after` (oldest first, at most `limit`)."""
+        with self.cond:
+            if not self.packets:
+                return []
+            first = self.packets[0][0]["no"]
+            start = max(after - first + 1, 0)
+            return [self.packets[i][0] for i in range(start, min(start + limit, len(self.packets)))]
+
+    def packet_detail(self, no: int) -> dict | None:
+        with self.cond:
+            if not self.packets:
+                return None
+            idx = no - self.packets[0][0]["no"]
+            if not 0 <= idx < len(self.packets):
+                return None
+            summary, pkt = self.packets[idx]
+        return {"summary": summary, **dissect(pkt)}
 
     # ------------------------------------------------------------- capture
 
@@ -60,7 +103,7 @@ class Engine:
             threading.Thread(target=self._replay, name="replay", daemon=True).start()
 
     def _start_live(self) -> None:
-        self._sniffer = AsyncSniffer(iface=self.net.iface, filter=CAPTURE_FILTER,
+        self._sniffer = AsyncSniffer(iface=self.net.iface, filter=self.capture_filter,
                                      prn=self._feed, store=False)
         try:
             self._sniffer.start()

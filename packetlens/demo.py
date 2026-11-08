@@ -4,7 +4,10 @@ It plays out on a fictional network 192.168.50.0/24:
   * a laptop and a smart TV are already connected (seen via ARP),
   * a phone joins and the router's DHCP ACK is broadcast  -> confirmed by ACK,
   * a laptop joins but the ACK is unicast (we don't see it) -> confirmed by ARP,
-  * a tablet reconnects (skips Discover, sends Request)   -> confirmed by ACK.
+  * a tablet reconnects (skips Discover, sends Request)   -> confirmed by ACK,
+  * then normal traffic: DNS (failing - the router has no internet), a ping,
+    an mDNS query, and an HTTP login to the router's admin page. Click that
+    POST in the packet table: the password is readable, because HTTP isn't encrypted.
 
 Write it to a file and open it in Wireshark to compare:
     python -m packetlens.demo samples/demo.pcap
@@ -16,8 +19,10 @@ import sys
 from pathlib import Path
 
 from scapy.layers.dhcp import BOOTP, DHCP
-from scapy.layers.inet import IP, UDP
+from scapy.layers.dns import DNS, DNSQR
+from scapy.layers.inet import ICMP, IP, TCP, UDP
 from scapy.layers.l2 import ARP, Ether
+from scapy.packet import Raw
 from scapy.utils import wrpcap
 
 SUBNET = "192.168.50.0/24"
@@ -58,7 +63,38 @@ def _arp(src_mac: str, src_ip: str, target_ip: str, op: int = 1):
     return Ether(src=src_mac, dst=BCAST) / ARP(op=op, hwsrc=src_mac, psrc=src_ip, pdst=target_ip)
 
 
+def _ip(src: tuple, dst: tuple):
+    """Ethernet + IP between two (ip, mac, ...) devices."""
+    return Ether(src=src[1], dst=dst[1]) / IP(src=src[0], dst=dst[0])
+
+
+def _web_session(client: tuple, server: tuple) -> list[tuple[float, object]]:
+    """TCP handshake, a page load and a cleartext login to the router's admin page."""
+    cport, c, s = 51515, 1000, 5000
+    get = b"GET /login.html HTTP/1.1\r\nHost: 192.168.50.1\r\n\r\n"
+    page = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 18\r\n\r\n<form>Login</form>"
+    body = b"username=admin&password=demo-pass-123"
+    post = (b"POST /login HTTP/1.1\r\nHost: 192.168.50.1\r\n"
+            b"Content-Type: application/x-www-form-urlencoded\r\nContent-Length: "
+            + str(len(body)).encode() + b"\r\n\r\n" + body)
+    up = lambda flags, seq, ack, data=b"": _ip(client, server) / TCP(  # noqa: E731
+        sport=cport, dport=80, flags=flags, seq=seq, ack=ack) / (Raw(data) if data else b"")
+    down = lambda flags, seq, ack, data=b"": _ip(server, client) / TCP(  # noqa: E731
+        sport=80, dport=cport, flags=flags, seq=seq, ack=ack) / (Raw(data) if data else b"")
+    return [
+        (0.00, up("S", c, 0)),
+        (0.01, down("SA", s, c + 1)),
+        (0.02, up("A", c + 1, s + 1)),
+        (0.03, up("PA", c + 1, s + 1, get)),
+        (0.05, down("PA", s + 1, c + 1 + len(get), page)),
+        (2.50, up("PA", c + 1 + len(get), s + 1 + len(page), post)),
+        (2.52, down("A", s + 1 + len(page), c + 1 + len(get) + len(post))),
+    ]
+
+
 def build_demo_packets(start: float = 1_700_000_000.0) -> list:
+    router = (ROUTER_IP, ROUTER_MAC)
+    mdns = ("224.0.0.251", "01:00:5e:00:00:fb")
     timeline = [
         # Background: devices that were already here.
         (0.0, _arp(ROUTER_MAC, ROUTER_IP, LAPTOP[0])),
@@ -81,6 +117,17 @@ def build_demo_packets(start: float = 1_700_000_000.0) -> list:
         # Tablet reconnects with an IP it remembers - straight to Request.
         (17.0, _dhcp_from_client(TABLET[1], "request", TABLET[2], 0x3003, requested=TABLET[0])),
         (17.2, _dhcp_from_router(TABLET[1], "ack", TABLET[0], 0x3003, broadcast=True)),
+
+        # Everyday traffic once they're online.
+        (19.0, _ip(PHONE, router) / UDP(sport=50123, dport=53)
+               / DNS(id=0x1a2b, rd=1, qd=DNSQR(qname="connectivitycheck.gstatic.com"))),
+        (19.1, _ip(router, PHONE) / UDP(sport=53, dport=50123)
+               / DNS(id=0x1a2b, qr=1, ra=1, rcode=2, qd=DNSQR(qname="connectivitycheck.gstatic.com"))),
+        (20.0, _ip(TABLET, mdns) / UDP(sport=5353, dport=5353)
+               / DNS(id=0, qd=DNSQR(qname="_airplay._tcp.local", qtype="PTR"))),
+        (21.0, _ip(NEW_LAPTOP, router) / ICMP(type=8, id=0x4c, seq=1) / Raw(b"ping-demo-payload")),
+        (21.01, _ip(router, NEW_LAPTOP) / ICMP(type=0, id=0x4c, seq=1) / Raw(b"ping-demo-payload")),
+        *[(23.0 + t, pkt) for t, pkt in _web_session(NEW_LAPTOP, router)],
     ]
     packets = []
     for offset, pkt in timeline:

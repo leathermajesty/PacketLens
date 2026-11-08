@@ -3,8 +3,9 @@
 A small network packet analyzer, built step by step to learn how devices join a Wi-Fi network
 and, later, to spot attacks on it.
 
-**Step 1 (current):** a live dashboard showing your Wi-Fi network, the devices already on it,
-and a topology map that adds a new device the moment the router gives it an IP address.
+A live dashboard showing your Wi-Fi network, the devices already on it, a topology map that
+adds a new device the moment the router gives it an IP address, and a Wireshark-style live
+packet table with a details pane.
 
 ## Quick start (macOS)
 
@@ -31,6 +32,7 @@ Live capture needs access to `/dev/bpf*`. If you get a permission error, install
 | `--demo` | Replay a built-in example network (no devices needed) |
 | `--pcap FILE` | Replay a saved capture, e.g. from Wireshark |
 | `-i en0` | Capture on a specific interface (default: the one with your default route) |
+| `-f "not port 443"` | Capture filter (BPF, same syntax as Wireshark's *capture* filter); default: everything |
 | `--ssid NAME` | Wi-Fi name to display (macOS hides the real one, see below) |
 | `--no-scan` | Don't ARP-scan the subnet at start (passive only) |
 | `--speed 5` | Replay 5x faster |
@@ -39,10 +41,36 @@ Live capture needs access to `/dev/bpf*`. If you get a permission error, install
 ## How it works
 
 ```
-Wi-Fi (en0) ──► sniffer (scapy) ──► device tracker ──► local web server ──► browser dashboard
-                only ARP + DHCP     "new device?"      Server-Sent Events   Wi-Fi, devices,
-                                                                            topology, log
+                                ┌─► device tracker ──┐
+Wi-Fi (en0) ──► sniffer (scapy) ┤   (ARP + DHCP)     ├─► local web server ──► browser dashboard
+                                └─► packet buffer ───┘   Server-Sent Events   devices, topology,
+                                    (last 2,000)                              packets, details
 ```
+
+### The live packet table
+
+Every captured packet gets a row, like Wireshark's packet list:
+
+| Column | Meaning |
+|---|---|
+| No. | Packet number since PacketLens started |
+| Time | Seconds since the first packet |
+| Source / Destination | IP addresses, or MAC addresses for non-IP packets like ARP |
+| Protocol | The most specific protocol PacketLens recognises (ARP, DHCP, DNS, TCP, TLS, HTTP, QUIC…) |
+| Length | Bytes on the wire |
+| Info | A one-line summary: DNS question, TCP flags, HTTP request line, "Who has…?" |
+
+- **Click a row** (or use ↑/↓) to decode it layer by layer, with a hex dump, and highlight both
+  devices on the topology.
+- **Filter** shows rows containing every word you type: `dns`, `tcp 192.168.1.5`, `syn`, a MAC…
+  It matches the protocol layers too, so `udp` also shows DNS and DHCP.
+- **Pause** stops adding rows (capture keeps running); **Clear** empties the table.
+
+Protocol names for TCP/UDP come from well-known ports (443 → TLS, 5353 → mDNS), so a service on
+an unusual port shows as plain TCP/UDP. Wireshark does deeper detection.
+
+**Try the demo:** run `--demo`, click the `POST /login` HTTP packet, and read the password in
+the payload. That's why router admin pages (and everything else) should use HTTPS.
 
 ### Finding devices that are already connected
 
@@ -97,11 +125,12 @@ packetlens/
   netinfo.py    interface, IP/MAC, router, Wi-Fi details (macOS tools)
   scanner.py    ARP scan of the subnet
   tracker.py    the device list and the "joined with an IP" rule
-  engine.py     live capture / replay, feeds the tracker
+  packets.py    packet table rows + Wireshark-style layer details and hex dump
+  engine.py     live capture / replay, packet buffer, feeds the tracker
   server.py     local web server + live updates
   demo.py       made-up example network
   web/          dashboard (HTML, CSS, JS - no internet needed)
-tests/          unit tests for the tracker
+tests/          unit tests (device tracker, packet decoding)
 samples/        demo capture
 ```
 
@@ -114,7 +143,7 @@ Run the tests:
 ## Roadmap
 
 - [x] **Step 1:** Wi-Fi info, existing devices, live topology, new device on DHCP IP assignment
-- [ ] **Step 2:** live packet table beside the topology
+- [x] **Step 2:** live packet table beside the topology, packet details + hex dump, filter
 - [ ] **Step 3:** device details on click (vendor, hostname, first/last seen)
 - [ ] **Step 4:** traffic on the topology (links flash, byte counters)
 - [ ] **Step 5:** monitor mode: catch the WPA2 4-way handshake ("device entered the right password")

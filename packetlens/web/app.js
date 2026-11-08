@@ -82,7 +82,8 @@ function renderStatus(s) {
     cls = "err";
     text = s.capture.error;
   } else if (s.source === "live") {
-    text = s.capture.running ? `Live on ${s.network.iface} · ${n} DHCP/ARP packets` : "Starting capture…";
+    const filter = s.capture.filter ? ` · filter "${s.capture.filter}"` : "";
+    text = s.capture.running ? `Live on ${s.network.iface} · ${n} packets${filter}` : "Starting capture…";
   } else {
     const what = s.source === "demo" ? "demo" : s.pcap;
     text = s.capture.finished ? `Replay of ${what} finished · ${n} packets` : `Replaying ${what} · ${n} packets`;
@@ -165,7 +166,7 @@ function renderDevices(s) {
     body.append(top, mac, el("div", "device-how", describeOrigin(d)));
     li.append(el("span", "dot"), body);
     li.addEventListener("mouseenter", () => highlight(d.mac));
-    li.addEventListener("mouseleave", () => highlight(null));
+    li.addEventListener("mouseleave", () => highlight(pk.selectedMacs));
     list.append(li);
   }
 }
@@ -208,8 +209,9 @@ function layoutTargets() {
   const cx = topo.w / 2;
   const cy = topo.h / 2 - 10;
   const others = topo.devices.filter((d) => d.mac !== topo.routerKey);
-  const rx = Math.max(90, topo.w / 2 - 90);
-  const ry = Math.max(80, topo.h / 2 - 70);
+  // Leave room for the labels: ~60px each side, ~50px under the bottom nodes.
+  const rx = Math.max(90, topo.w / 2 - 62);
+  const ry = Math.max(80, topo.h / 2 - 58);
   const targets = new Map([[topo.routerKey, { x: cx, y: cy }]]);
   const twoRings = others.length > 12;
   others.forEach((d, i) => {
@@ -306,14 +308,16 @@ function tick() {
   topo.raf = moving ? requestAnimationFrame(tick) : null;
 }
 
-function highlight(mac) {
-  for (const [key, it] of topo.items) it.g.classList.toggle("hl", key === mac);
+function highlight(macs) {
+  const keep = new Set([].concat(macs || []).filter(Boolean));
+  for (const [key, it] of topo.items) it.g.classList.toggle("hl", keep.has(key));
 }
 
 new ResizeObserver(() => {
   topo.w = topo.svg.clientWidth;
   topo.h = topo.svg.clientHeight;
   topo.svg.setAttribute("viewBox", `0 0 ${topo.w} ${topo.h}`);
+  topo.svg.classList.toggle("compact", topo.w < 560);  // hide MAC labels when space is tight
   relayout();
 }).observe(topo.svg);
 
@@ -361,6 +365,182 @@ function toast(title, detail) {
   setTimeout(() => t.remove(), 6000);
 }
 
+// ---------------------------------------------------------------- packets
+
+const MAX_ROWS = 1500;            // rows kept in the table (oldest are dropped)
+const pk = {
+  tbody: $("packet-rows"),
+  wrap: $("table-wrap"),
+  filter: [],                     // lower-case words; a row must contain all of them
+  paused: false,
+  queued: [],                     // rows that arrived while paused
+  lastNo: 0,                      // newest packet number received
+  clearedUpTo: 0,                 // ignore packets at or below this (after Clear)
+  selected: null,
+  selectedMacs: null,
+};
+
+function protoClass(proto) {
+  return "p-" + proto.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function rowMatches(tr) {
+  return pk.filter.every((word) => tr.dataset.text.includes(word));
+}
+
+function makeRow(p) {
+  const tr = document.createElement("tr");
+  tr.dataset.no = p.no;
+  tr.dataset.text = [p.proto, p.stack, p.src, p.dst, p.src_mac, p.dst_mac, p.info]
+    .filter(Boolean).join(" ").toLowerCase();
+  tr._pkt = p;
+  const values = [p.no, p.rel.toFixed(3), p.src, p.dst, null, p.length, p.info];
+  values.forEach((value, i) => {
+    const td = document.createElement("td");
+    if (i === 4) td.append(el("span", `proto ${protoClass(p.proto)}`, p.proto));
+    else td.textContent = value;
+    if (i === 0) td.className = "num";
+    if (i === 2 || i === 3 || i === 6) td.title = value;
+    tr.append(td);
+  });
+  if (!rowMatches(tr)) tr.classList.add("hidden");
+  return tr;
+}
+
+function updatePacketCount() {
+  const total = pk.tbody.rows.length;
+  const shown = pk.filter.length ? pk.tbody.querySelectorAll("tr:not(.hidden)").length : total;
+  $("packet-count").textContent = pk.filter.length ? `${shown} / ${total}` : total;
+  const empty = $("table-empty");
+  empty.style.display = shown ? "none" : "";
+  empty.textContent = total ? "No packets match the filter." : "Waiting for packets…";
+}
+
+function appendRows(batch) {
+  const wrap = pk.wrap;
+  const atBottom = wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 40;
+  const frag = document.createDocumentFragment();
+  for (const p of batch) frag.append(makeRow(p));
+  pk.tbody.append(frag);
+  while (pk.tbody.rows.length > MAX_ROWS) pk.tbody.rows[0].remove();
+  updatePacketCount();
+  if (atBottom) wrap.scrollTop = wrap.scrollHeight;  // follow new packets unless you scrolled up
+}
+
+function addPackets(batch) {
+  batch = batch.filter((p) => p.no > pk.lastNo && p.no > pk.clearedUpTo);
+  if (!batch.length) return;
+  pk.lastNo = batch[batch.length - 1].no;
+  if (pk.paused) {
+    pk.queued.push(...batch);
+    if (pk.queued.length > MAX_ROWS) pk.queued.splice(0, pk.queued.length - MAX_ROWS);
+    updatePauseButton();
+  } else {
+    appendRows(batch);
+  }
+}
+
+function resetPackets() {
+  pk.tbody.replaceChildren();
+  pk.queued = [];
+  pk.lastNo = 0;
+  pk.clearedUpTo = 0;
+  clearSelection();
+  updatePacketCount();
+}
+
+function updatePauseButton() {
+  const btn = $("pause-btn");
+  btn.classList.toggle("active", pk.paused);
+  btn.textContent = pk.paused ? `Resume${pk.queued.length ? ` (${pk.queued.length} new)` : ""}` : "Pause";
+}
+
+function clearSelection() {
+  pk.selected = null;
+  pk.selectedMacs = null;
+  highlight(null);
+  $("detail-hint").textContent = "Click a packet to decode it";
+  $("detail").replaceChildren(el("p", "empty", "Select a row in Live packets to see every layer, like Wireshark's details pane."));
+}
+
+async function selectPacket(tr) {
+  if (!tr || !tr._pkt) return;
+  pk.tbody.querySelector("tr.selected")?.classList.remove("selected");
+  tr.classList.add("selected");
+  tr.scrollIntoView({ block: "nearest" });
+  const p = tr._pkt;
+  pk.selected = p.no;
+  pk.selectedMacs = [p.src_mac, p.dst_mac];
+  highlight(pk.selectedMacs);
+  $("detail-hint").textContent = `Packet ${p.no} · ${p.length} bytes · ${p.stack}`;
+  try {
+    const res = await fetch(`/api/packet/${p.no}`);
+    const data = await res.json();
+    if (pk.selected !== p.no) return;  // user already clicked something else
+    if (!res.ok) throw new Error(data.error);
+    renderDetail(data);
+  } catch (err) {
+    $("detail").replaceChildren(el("p", "empty", err.message || "Could not load this packet."));
+  }
+}
+
+function renderDetail(d) {
+  const box = $("detail");
+  box.replaceChildren();
+  d.layers.forEach((layer, i) => {
+    const section = document.createElement("details");
+    section.open = i === d.layers.length - 1;  // open the innermost layer (the interesting bit)
+    section.append(el("summary", null, layer.name));
+    const dl = el("dl");
+    for (const [name, value] of layer.fields) dl.append(el("dt", null, name), el("dd", null, value));
+    section.append(dl);
+    box.append(section);
+  });
+  box.append(el("pre", "hex", d.hex.join("\n")));
+}
+
+pk.tbody.addEventListener("click", (e) => selectPacket(e.target.closest("tr")));
+
+pk.wrap.tabIndex = 0;
+pk.wrap.addEventListener("keydown", (e) => {
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+  e.preventDefault();
+  const current = pk.tbody.querySelector("tr.selected");
+  let next = current
+    ? (e.key === "ArrowDown" ? current.nextElementSibling : current.previousElementSibling)
+    : pk.tbody.querySelector("tr:not(.hidden)");
+  while (next && next.classList.contains("hidden")) {
+    next = e.key === "ArrowDown" ? next.nextElementSibling : next.previousElementSibling;
+  }
+  if (next) selectPacket(next);
+});
+
+$("pkt-filter").addEventListener("input", (e) => {
+  pk.filter = e.target.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  for (const tr of pk.tbody.rows) tr.classList.toggle("hidden", !rowMatches(tr));
+  updatePacketCount();
+});
+
+$("pause-btn").addEventListener("click", () => {
+  pk.paused = !pk.paused;
+  if (!pk.paused && pk.queued.length) {
+    appendRows(pk.queued);
+    pk.queued = [];
+  }
+  updatePauseButton();
+});
+
+$("clear-btn").addEventListener("click", () => {
+  pk.tbody.replaceChildren();
+  pk.queued = [];
+  pk.clearedUpTo = pk.lastNo;
+  clearSelection();
+  updatePauseButton();
+  updatePacketCount();
+});
+
+clearSelection();
+
 // ----------------------------------------------------------------- wiring
 
 function rerender() {
@@ -369,6 +549,7 @@ function rerender() {
 }
 
 function apply(s) {
+  if (s.capture.packets < pk.lastNo) resetPackets();  // PacketLens was restarted
   lastState = s;
   renderStatus(s);
   if (s.version === lastVersion) return;
@@ -382,7 +563,8 @@ function apply(s) {
 
 function connect() {
   const es = new EventSource("/api/stream");
-  es.onmessage = (e) => apply(JSON.parse(e.data));
+  es.addEventListener("state", (e) => apply(JSON.parse(e.data)));
+  es.addEventListener("packets", (e) => addPackets(JSON.parse(e.data)));
   es.onerror = () => {
     $("status").className = "status err";
     $("status-text").textContent = "Lost connection to PacketLens - is it still running?";

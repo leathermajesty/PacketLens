@@ -18,6 +18,8 @@ def parse_args() -> argparse.Namespace:
     src.add_argument("--demo", action="store_true", help="play a built-in example (no real network needed)")
     src.add_argument("--pcap", metavar="FILE", help="replay a saved capture instead of sniffing live")
     p.add_argument("-i", "--iface", help="interface to capture on (default: the one with the default route)")
+    p.add_argument("-f", "--filter", metavar="BPF",
+                   help='capture filter, e.g. "not port 443" or "arp or udp" (default: everything)')
     p.add_argument("--ssid", help="Wi-Fi name to display (macOS may hide the real one)")
     p.add_argument("--port", type=int, default=8000, help="dashboard port (default 8000)")
     p.add_argument("--speed", type=float, default=1.0, help="replay speed multiplier (default 1.0)")
@@ -42,7 +44,8 @@ def main() -> None:
     if args.ssid:
         net.ssid = args.ssid
 
-    engine = Engine(net, source=source, pcap_path=args.pcap, speed=args.speed)
+    engine = Engine(net, source=source, pcap_path=args.pcap, speed=args.speed,
+                    capture_filter=args.filter)
     engine.start()
     if source == "live":
         engine.load_arp_cache()
