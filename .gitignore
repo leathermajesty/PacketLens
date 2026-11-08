@@ -1,0 +1,13 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Captures from your own network contain real MAC/IP addresses - keep them local.
+*.pcap
+*.pcapng
+# ...except the made-up demo capture
+!samples/demo.pcap
+
+# macOS
+.DS_Store

@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PacketLens</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"/>
+        <path d="M15.5 15.5 21 21" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+        <path d="M7 11h2l1-3 2 6 1-3h1" fill="none" stroke="currentColor" stroke-width="1.6"
+              stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="brand-name">PacketLens</span>
+      <span class="step-tag">Step 1 · Devices</span>
+    </div>
+    <div class="status" id="status"><span class="status-dot"></span><span id="status-text">Connecting…</span></div>
+    <button id="scan-btn" class="btn" disabled>Rescan network</button>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="card">
+        <div class="card-head">
+          <h2>Wi-Fi network</h2>
+          <button id="rename-btn" class="link-btn" title="Set the name shown here">Rename</button>
+        </div>
+        <div class="ssid" id="ssid">—</div>
+        <dl class="kv" id="wifi-kv"></dl>
+        <p class="scan-line" id="scan-line"></p>
+      </section>
+
+      <section class="card grow">
+        <div class="card-head">
+          <h2>Devices <span class="count" id="device-count">0</span></h2>
+        </div>
+        <ul class="device-list" id="device-list"></ul>
+      </section>
+    </aside>
+
+    <section class="stage">
+      <div class="card topo-card">
+        <div class="card-head">
+          <h2>Live topology</h2>
+          <ul class="legend">
+            <li><span class="swatch router"></span>Router</li>
+            <li><span class="swatch self"></span>This Mac</li>
+            <li><span class="swatch existing"></span>Already connected</li>
+            <li><span class="swatch joined"></span>Newly joined</li>
+          </ul>
+        </div>
+        <svg id="topo" role="img" aria-label="Network topology"></svg>
+      </div>
+
+      <div class="card log-card">
+        <div class="card-head">
+          <h2>Join activity</h2>
+          <span class="hint">DHCP and ARP steps, newest first</span>
+        </div>
+        <ol class="log" id="log"></ol>
+      </div>
+    </section>
+  </main>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
