@@ -24,6 +24,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--port", type=int, default=8000, help="dashboard port (default 8000)")
     p.add_argument("--speed", type=float, default=1.0, help="replay speed multiplier (default 1.0)")
     p.add_argument("--no-scan", action="store_true", help="don't ARP-scan for existing devices at start")
+    p.add_argument("--checkin", type=float, default=30.0, metavar="SECONDS",
+                   help="ARP check-in interval for spotting devices that left (default 30, 0 = off)")
     p.add_argument("--no-browser", action="store_true", help="don't open the browser automatically")
     return p.parse_args()
 
@@ -33,7 +35,8 @@ def main() -> None:
 
     if args.demo:
         source = "demo"
-        net = NetworkInfo(iface=None, cidr=demo.SUBNET, gateway_ip=demo.ROUTER_IP,
+        net = NetworkInfo(iface=None, ip=demo.SELF_IP, mac=demo.SELF_MAC,
+                          cidr=demo.SUBNET, gateway_ip=demo.ROUTER_IP,
                           gateway_mac=demo.ROUTER_MAC, ssid="PacketLens-Demo", security="WPA2_PSK")
     elif args.pcap:
         source = "pcap"
@@ -45,7 +48,7 @@ def main() -> None:
         net.ssid = args.ssid
 
     engine = Engine(net, source=source, pcap_path=args.pcap, speed=args.speed,
-                    capture_filter=args.filter)
+                    capture_filter=args.filter, checkin_interval=max(args.checkin, 0))
     engine.start()
     if source == "live":
         engine.load_arp_cache()

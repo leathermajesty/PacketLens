@@ -15,21 +15,30 @@ from scapy.utils import PcapReader
 
 from .netinfo import NetworkInfo, read_arp_table
 from .packets import dissect, summarize
-from .scanner import arp_scan
+from .scanner import arp_scan, send_arp_checkins
 from .tracker import DeviceTracker
 
 BUFFER_SIZE = 2000    # packets kept in memory for the table and the detail view
 MAX_REPLAY_GAP = 3.0  # don't wait longer than this between replayed packets
+# The tracker needs these for joins and presence, whatever filter the user picks.
+REQUIRED_FILTER = "arp or (udp and (port 67 or port 68))"
+
+
+def effective_filter(user_filter: str | None) -> str | None:
+    """A user capture filter, widened so ARP and DHCP always get through."""
+    return f"({user_filter}) or {REQUIRED_FILTER}" if user_filter else None
 
 
 class Engine:
     def __init__(self, net: NetworkInfo, source: str = "live", pcap_path: str | None = None,
-                 speed: float = 1.0, capture_filter: str | None = None):
+                 speed: float = 1.0, capture_filter: str | None = None,
+                 checkin_interval: float = 30.0):
         self.net = net
         self.source = source              # "live" | "pcap" | "demo"
         self.pcap_path = pcap_path
         self.speed = max(speed, 0.01)
         self.capture_filter = capture_filter or None
+        self.checkin_interval = checkin_interval  # seconds between ARP check-ins; 0 = off
         self.cond = threading.Condition(threading.RLock())
         self.version = 0                  # bumps when devices/log/status change
         self.packet_seq = 0               # number of the newest packet
@@ -41,6 +50,8 @@ class Engine:
                         "filter": self.capture_filter or "", "decode_errors": 0,
                         "buffer": BUFFER_SIZE}
         self.scan = {"running": False, "error": None, "last_run": None, "found": 0}
+        self.presence = {"checkins": False, "interval": checkin_interval, "last_run": None,
+                         "sent": 0, "error": None}
         self._sniffer: AsyncSniffer | None = None
         self._stop = threading.Event()
 
@@ -103,7 +114,7 @@ class Engine:
             threading.Thread(target=self._replay, name="replay", daemon=True).start()
 
     def _start_live(self) -> None:
-        self._sniffer = AsyncSniffer(iface=self.net.iface, filter=self.capture_filter,
+        self._sniffer = AsyncSniffer(iface=self.net.iface, filter=effective_filter(self.capture_filter),
                                      prn=self._feed, store=False)
         try:
             self._sniffer.start()
@@ -114,6 +125,28 @@ class Engine:
         except Exception as exc:  # noqa: BLE001 - surface any capture error in the UI
             self.capture["error"] = f"Could not capture on {self.net.iface}: {exc}"
         self._changed()
+        if self.capture["running"]:
+            self.presence["checkins"] = bool(self.checkin_interval and self.net.mac and self.net.ip)
+            threading.Thread(target=self._presence_loop, name="presence", daemon=True).start()
+
+    def _presence_loop(self) -> None:
+        """Every second: let check-ins time out. Every `checkin_interval`: send new ones."""
+        next_checkin = time.time() + (self.checkin_interval or 0)
+        while not self._stop.wait(1.0):
+            now = time.time()
+            with self.cond:
+                if self.tracker.tick(now):
+                    self._changed()
+                due = self.presence["checkins"] and now >= next_checkin
+                targets = self.tracker.checkin_targets(now, self.checkin_interval) if due else []
+            if not due:
+                continue
+            next_checkin = now + self.checkin_interval
+            try:
+                send_arp_checkins(self.net.iface, self.net.mac, self.net.ip, targets)
+                self.presence.update(last_run=now, sent=len(targets), error=None)
+            except Exception as exc:  # noqa: BLE001
+                self.presence["error"] = str(exc)
 
     def _replay(self) -> None:
         from .demo import build_demo_packets
@@ -194,5 +227,6 @@ class Engine:
                 "router": {"ip": self.tracker.router_ip, "mac": self.tracker.router_mac},
                 "capture": dict(self.capture),
                 "scan": dict(self.scan),
+                "presence": dict(self.presence),
                 **self.tracker.snapshot(),
             }

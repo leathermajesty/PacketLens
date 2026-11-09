@@ -4,8 +4,8 @@ A small network packet analyzer, built step by step to learn how devices join a 
 and, later, to spot attacks on it.
 
 A live dashboard showing your Wi-Fi network, the devices already on it, a topology map that
-adds a new device the moment the router gives it an IP address, and a Wireshark-style live
-packet table with a details pane.
+adds a new device the moment the router gives it an IP address (and fades it out when it
+leaves), and a Wireshark-style live packet table with a details pane.
 
 ## Quick start (macOS)
 
@@ -32,9 +32,10 @@ Live capture needs access to `/dev/bpf*`. If you get a permission error, install
 | `--demo` | Replay a built-in example network (no devices needed) |
 | `--pcap FILE` | Replay a saved capture, e.g. from Wireshark |
 | `-i en0` | Capture on a specific interface (default: the one with your default route) |
-| `-f "not port 443"` | Capture filter (BPF, same syntax as Wireshark's *capture* filter); default: everything |
+| `-f "not port 443"` | Capture filter (BPF, same syntax as Wireshark's *capture* filter); default: everything. ARP and DHCP are always added, because joins and presence need them |
 | `--ssid NAME` | Wi-Fi name to display (macOS hides the real one, see below) |
-| `--no-scan` | Don't ARP-scan the subnet at start (passive only) |
+| `--no-scan` | Don't ARP-scan the subnet at start |
+| `--checkin 30` | Seconds between ARP check-ins on quiet devices (`0` = off, fully passive) |
 | `--speed 5` | Replay 5x faster |
 | `--port 8000` | Dashboard port |
 
@@ -99,11 +100,42 @@ Because the ACK is often unicast, PacketLens adds a device to the topology when 
 A Request with no confirmation within 60 seconds is dropped. If a DHCP Offer or ACK comes from
 anything other than your router, PacketLens warns about a **possible rogue DHCP server**.
 
+### Detecting a device leaving
+
+When a device disconnects, it usually **doesn't announce it**. Phones that walk out of range,
+laptops that sleep, or devices that switch Wi-Fi off simply go quiet:
+
+| Event | What's on the air | Visible to your Mac? |
+|---|---|---|
+| Wi-Fi switched off / network forgotten | 802.11 *Deauthentication* or *Disassociation* to the router | Only in monitor mode (a later step) |
+| Walked out of range, battery died | Nothing - it just stops | Only by noticing the silence |
+| Clean shutdown (some laptops) | DHCP *Release* | Yes |
+
+So PacketLens tracks presence itself:
+
+| Status | Meaning |
+|---|---|
+| **Online** | Sent something in the last 60 s |
+| **Idle** | Quiet for 60 s+, but still answers our ARP check-ins (e.g. a phone with the screen off) |
+| **Offline** | Didn't answer 3 check-ins in a row (~1.5 min with the default 30 s interval) |
+| **Left** | Sent a DHCP Release |
+
+A **check-in** is an ARP "who has 192.168.1.x? tell *me*" sent to each device that's been
+quiet for 30 s. It is broadcast, because phones in power-save mode only wake for broadcasts on schedule; unicast frames to a sleeping phone wait at the router. Every connected device must answer ARP, so silence is a strong sign it is gone.
+The tracker watches for our own questions in the capture and waits 5 s for any packet back. It
+only counts *our* questions, because replies to the router's ARP requests go to the router and
+never reach us. Any packet from an offline device brings it straight back online.
+
+It's a strong guess, not a certainty: a phone in deep sleep can occasionally miss a check-in.
+Only monitor mode sees the actual "goodbye" frame.
+
 ### Try it
 
 1. Run `.venv/bin/python -m packetlens`.
 2. On your phone: Settings → Wi-Fi → *Forget this network*, then reconnect with the password.
 3. Watch the Join activity log go Discover → Request → ACK/ARP, and the phone appear in green.
+4. Turn the phone's Wi-Fi off. About 1.5 minutes later it fades to *Offline* with
+   "left the network". Turn Wi-Fi back on and it returns.
 
 To see the same packets in Wireshark, use the display filter `dhcp || arp`. The demo capture is
 in `samples/demo.pcap` (regenerate it with `.venv/bin/python -m packetlens.demo`).
@@ -123,8 +155,8 @@ in `samples/demo.pcap` (regenerate it with `.venv/bin/python -m packetlens.demo`
 packetlens/
   __main__.py   command line, starts everything
   netinfo.py    interface, IP/MAC, router, Wi-Fi details (macOS tools)
-  scanner.py    ARP scan of the subnet
-  tracker.py    the device list and the "joined with an IP" rule
+  scanner.py    ARP scan of the subnet, ARP check-ins
+  tracker.py    the device list: "joined with an IP" rule and online/idle/offline presence
   packets.py    packet table rows + Wireshark-style layer details and hex dump
   engine.py     live capture / replay, packet buffer, feeds the tracker
   server.py     local web server + live updates
@@ -144,9 +176,11 @@ Run the tests:
 
 - [x] **Step 1:** Wi-Fi info, existing devices, live topology, new device on DHCP IP assignment
 - [x] **Step 2:** live packet table beside the topology, packet details + hex dump, filter
-- [ ] **Step 3:** device details on click (vendor, hostname, first/last seen)
-- [ ] **Step 4:** traffic on the topology (links flash, byte counters)
-- [ ] **Step 5:** monitor mode: catch the WPA2 4-way handshake ("device entered the right password")
-- [ ] **Step 6:** attack detection: ARP spoofing, port scans, rogue DHCP
+- [x] **Step 3:** presence: online / idle / offline via ARP check-ins, devices fade when they leave
+- [ ] **Step 4:** device details on click (vendor, hostname, first/last seen)
+- [ ] **Step 5:** traffic on the topology (links flash, byte counters)
+- [ ] **Step 6:** monitor mode: the WPA2 4-way handshake ("device entered the right password")
+  and deauthentication frames ("device disconnected" - or a deauth attack)
+- [ ] **Step 7:** attack detection: ARP spoofing, port scans, rogue DHCP
 
 Only capture and scan networks you own or have permission to test.

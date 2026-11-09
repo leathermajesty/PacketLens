@@ -63,8 +63,23 @@ function isFresh(mac) {
   return (freshUntil.get(mac) || 0) > Date.now();
 }
 
+function ago(seconds) {
+  if (seconds < 5) return "just now";
+  if (seconds < 60) return `${Math.round(seconds)}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+  return `${Math.floor(seconds / 3600)} h ago`;
+}
+
+// "clock" is the tracker's time: real time when live, packet time when replaying.
+function describePresence(d, clock) {
+  if (d.role === "self") return "Online · capturing";
+  if (d.status === "offline") return `Offline since ${fmtTime(d.left_at)} · ${d.missed_checks} check-ins unanswered`;
+  if (d.status === "released") return `Left ${fmtTime(d.left_at)} · said goodbye (DHCP Release)`;
+  if (d.status === "idle") return `Idle · quiet for ${ago(clock - d.last_active).replace(" ago", "")}, still answers`;
+  return `Online · seen ${ago(Math.max(0, clock - d.last_seen))}`;
+}
+
 function describeOrigin(d) {
-  if (d.status === "released") return "Left the network (DHCP Release)";
   if (d.role === "router") return d.found_by === "Default gateway" ? "Default gateway" : `Router · ${d.found_by}`;
   if (d.role === "self") return "You are capturing from here";
   if (d.origin === "joined") return `Joined ${fmtTime(d.joined_at)} · ${d.found_by}`;
@@ -153,7 +168,7 @@ function renderDevices(s) {
   }
 
   for (const d of s.devices) {
-    const li = el("li", `device role-${d.role} origin-${d.origin}${d.status === "released" ? " released" : ""}`);
+    const li = el("li", `device role-${d.role} origin-${d.origin} st-${d.status}`);
     const body = el("div", "device-body");
     const top = el("div", "device-top");
     top.append(el("span", "device-name", deviceName(d)), el("span", "device-ip mono", d.ip || "no IP"));
@@ -163,7 +178,8 @@ function renderDevices(s) {
       badge.title = "Randomized per-network MAC (locally administered bit set) - common on phones";
       mac.append(badge);
     }
-    body.append(top, mac, el("div", "device-how", describeOrigin(d)));
+    body.append(top, mac, el("div", "device-how", describeOrigin(d)),
+                el("div", `presence st-${d.status}`, describePresence(d, s.clock)));
     li.append(el("span", "dot"), body);
     li.addEventListener("mouseenter", () => highlight(d.mac));
     li.addEventListener("mouseleave", () => highlight(pk.selectedMacs));
@@ -242,7 +258,7 @@ function renderTopology(s) {
       topo.items.set(d.mac, it);
     }
     const fresh = isFresh(d.mac);
-    const state = `role-${d.role} origin-${d.origin}${d.status === "released" ? " released" : ""}${fresh ? " fresh" : ""}`;
+    const state = `role-${d.role} origin-${d.origin} st-${d.status}${fresh ? " fresh" : ""}`;
     it.g.setAttribute("class", `node ${state}`);
     it.line.setAttribute("class", `link ${state}`);
     it.line.style.display = d.mac === router.mac ? "none" : "";
@@ -250,7 +266,8 @@ function renderTopology(s) {
     const name = deviceName(d);
     it.name.textContent = name.length > 20 ? name.slice(0, 19) + "…" : name;
     it.sub.textContent = d.mac === "__router__" ? "" : d.mac;
-    it.title.textContent = `${name}\n${d.ip || "no IP"}\n${d.mac}\n${describeOrigin(d)}`;
+    it.title.textContent = `${name}\n${d.ip || "no IP"}\n${d.mac}\n${describeOrigin(d)}` +
+      (d.mac === "__router__" ? "" : `\n${describePresence(d, s.clock)}`);
   }
   for (const [mac, it] of topo.items) {
     if (!present.has(mac)) {
@@ -341,7 +358,9 @@ function renderLog(s) {
   }
 }
 
-// ------------------------------------------------------------ new joins
+// ------------------------------------------------- joins and departures
+
+let knownStatus = null;           // mac -> status, to spot devices leaving / coming back
 
 function detectJoins(s) {
   const joins = new Map(s.devices.filter((d) => d.origin === "joined").map((d) => [d.mac, d.joined_at]));
@@ -356,10 +375,24 @@ function detectJoins(s) {
     }
   }
   knownJoins = joins;
+
+  const statuses = new Map(s.devices.map((d) => [d.mac, d.status]));
+  if (knownStatus) {
+    for (const d of s.devices) {
+      const before = knownStatus.get(d.mac);
+      const gone = (st) => st === "offline" || st === "released";
+      if (before && !gone(before) && gone(d.status)) {
+        toast(`Device left: ${deviceName(d)}`, `${d.ip} · ${d.mac}`, "leave");
+      } else if (before && gone(before) && !gone(d.status)) {
+        toast(`Back online: ${deviceName(d)}`, `${d.ip} · ${d.mac}`);
+      }
+    }
+  }
+  knownStatus = statuses;
 }
 
-function toast(title, detail) {
-  const t = el("div", "toast");
+function toast(title, detail, kind = "") {
+  const t = el("div", `toast ${kind}`);
   t.append(el("strong", null, title), el("span", "mono", detail));
   $("toasts").append(t);
   setTimeout(() => t.remove(), 6000);
@@ -552,11 +585,11 @@ function apply(s) {
   if (s.capture.packets < pk.lastNo) resetPackets();  // PacketLens was restarted
   lastState = s;
   renderStatus(s);
+  renderDevices(s);                    // every update: keeps "seen 12s ago" fresh
   if (s.version === lastVersion) return;
   lastVersion = s.version;
   detectJoins(s);
   renderWifi(s);
-  renderDevices(s);
   renderTopology(s);
   renderLog(s);
 }

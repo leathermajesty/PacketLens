@@ -16,7 +16,7 @@
               stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
       <span class="brand-name">PacketLens</span>
-      <span class="step-tag">Step 2 · Packets</span>
+      <span class="step-tag">Step 3 · Presence</span>
     </div>
     <div class="status" id="status"><span class="status-dot"></span><span id="status-text">Connecting…</span></div>
     <button id="scan-btn" class="btn" disabled>Rescan network</button>
@@ -51,6 +51,7 @@
             <li><span class="swatch self"></span>You</li>
             <li title="Already connected when PacketLens started"><span class="swatch existing"></span>Existing</li>
             <li title="Seen joining via DHCP"><span class="swatch joined"></span>Joined</li>
+            <li title="Stopped answering ARP check-ins, or sent a DHCP Release"><span class="swatch offline"></span>Offline</li>
           </ul>
         </div>
         <svg id="topo" role="img" aria-label="Network topology"></svg>

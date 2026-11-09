@@ -5,7 +5,7 @@ from __future__ import annotations
 import ipaddress
 
 from scapy.layers.l2 import ARP, Ether
-from scapy.sendrecv import srp
+from scapy.sendrecv import sendp, srp
 
 MAX_ADDRESSES = 1024  # refuse to sweep anything bigger than a /22
 
@@ -21,3 +21,19 @@ def arp_scan(iface: str, cidr: str, my_mac: str, my_ip: str,
                / ARP(hwsrc=my_mac, psrc=my_ip, pdst=str(net)))
     answered, _ = srp(request, iface=iface, timeout=timeout, retry=1, verbose=0)
     return [(reply[ARP].psrc, reply[Ether].src.lower()) for _, reply in answered]
+
+
+def send_arp_checkins(iface: str, my_mac: str, my_ip: str, targets: list[tuple[str, str]]) -> None:
+    """Ask each known device "are you still at this IP?" with an ARP request.
+
+    Sent as broadcast, not unicast: phones in Wi-Fi power-save wake up for every
+    broadcast beacon, but unicast frames to them wait at the router until they next
+    wake, which can take longer than our reply timeout.
+
+    We don't wait for answers here: the sniffer sees our question and any reply,
+    and the device tracker decides who is still there.
+    """
+    frames = [Ether(src=my_mac, dst="ff:ff:ff:ff:ff:ff") / ARP(op=1, hwsrc=my_mac, psrc=my_ip, pdst=ip)
+              for ip, _mac in targets]
+    if frames:
+        sendp(frames, iface=iface, inter=0.02, verbose=0)

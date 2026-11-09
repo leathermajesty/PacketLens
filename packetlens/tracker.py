@@ -10,8 +10,21 @@ Rule 2 exists because the router often sends the ACK straight to the new device
 (unicast), so other computers on the Wi-Fi never see it. The Request and the ARP
 announcement are broadcasts, so we always see those.
 
-Devices discovered any other way (ARP cache, ARP scan, ARP traffic) were already
+Devices discovered any other way (ARP cache, ARP scan, ARP/IP traffic) were already
 connected before we started watching.
+
+Leaving is harder: most devices just go quiet (the Wi-Fi "goodbye" frame is only
+visible in monitor mode). So presence works like this:
+
+    online   - sent something in the last IDLE_AFTER seconds
+    idle     - quiet, but still answering our ARP check-ins
+    offline  - didn't answer OFFLINE_AFTER_MISSES check-ins in a row
+    released - said goodbye with a DHCP Release
+
+A check-in is an ARP "who has <ip>?" sent by *this Mac*. The tracker sees the
+question in the capture and waits ARP_REPLY_TIMEOUT seconds for any packet from
+that device. (Replies to other machines' ARP requests go to them, not to us, so
+only our own questions count.)
 """
 
 from __future__ import annotations
@@ -29,7 +42,10 @@ from .netinfo import is_randomized_mac, is_unicast_mac
 
 DHCP_TYPES = {1: "Discover", 2: "Offer", 3: "Request", 4: "Decline",
               5: "ACK", 6: "NAK", 7: "Release", 8: "Inform"}
-PENDING_TIMEOUT = 60.0  # seconds to wait for confirmation after a DHCP Request
+PENDING_TIMEOUT = 60.0      # seconds to wait for confirmation after a DHCP Request
+IDLE_AFTER = 60.0           # quiet this long -> "idle"
+ARP_REPLY_TIMEOUT = 5.0     # a check-in with no answer after this long is a miss
+OFFLINE_AFTER_MISSES = 3    # this many misses in a row -> "offline"
 LOG_SIZE = 300
 
 
@@ -43,9 +59,12 @@ class Device:
     origin: str = "existing"      # "existing" (was already connected) | "joined" (we saw it join)
     found_by: str = ""            # how we learned about it
     first_seen: float = 0.0
-    last_seen: float = 0.0
+    last_seen: float = 0.0        # any packet from it, including answers to our check-ins
+    last_active: float = 0.0      # packets it sent on its own (not just answering us)
     joined_at: float | None = None
-    status: str = "online"        # "online" | "released"
+    left_at: float | None = None
+    status: str = "online"        # "online" | "idle" | "offline" | "released"
+    missed_checks: int = 0
     randomized_mac: bool = False
 
     def to_dict(self) -> dict:
@@ -65,7 +84,7 @@ class PendingJoin:
 @dataclass
 class LogEntry:
     ts: float
-    level: str        # "step" | "success" | "info" | "warn"
+    level: str        # "step" | "success" | "info" | "warn" | "leave"
     text: str
     mac: str | None = None
 
@@ -99,10 +118,13 @@ class DeviceTracker:
     subnet: str | None = None
     devices: dict[str, Device] = field(default_factory=dict)
     pending: dict[str, PendingJoin] = field(default_factory=dict)
+    probes: dict[str, float] = field(default_factory=dict)  # mac -> when we asked "are you there?"
     log: deque = field(default_factory=lambda: deque(maxlen=LOG_SIZE))
+    clock: float = 0.0                                       # newest time we know about
 
     def __post_init__(self):
         self._net = ipaddress.ip_network(self.subnet, strict=False) if self.subnet else None
+        self._changes = 0
         now = time.time()
         if self.router_mac:
             self._upsert(self.router_mac, self.router_ip, now, role="router", found_by="Default gateway")
@@ -121,6 +143,7 @@ class DeviceTracker:
 
     def _say(self, ts: float, level: str, text: str, mac: str | None = None) -> None:
         self.log.append(LogEntry(ts=ts, level=level, text=text, mac=mac))
+        self._changes += 1
 
     def _label(self, mac: str, hostname: str | None = None) -> str:
         dev = self.devices.get(mac)
@@ -132,12 +155,13 @@ class DeviceTracker:
         dev = self.devices.get(mac)
         created = dev is None
         if created:
-            dev = Device(mac=mac, first_seen=ts, randomized_mac=is_randomized_mac(mac))
+            dev = Device(mac=mac, first_seen=ts, last_active=ts, randomized_mac=is_randomized_mac(mac))
             if mac == self.router_mac:
                 dev.role = "router"
             elif mac == self.self_mac:
                 dev.role = "self"
             self.devices[mac] = dev
+            self._changes += 1
         if ip:
             dev.ip = ip
         dev.last_seen = max(dev.last_seen, ts)
@@ -162,6 +186,8 @@ class DeviceTracker:
         if dev.role != "device":
             return
         dev.origin, dev.joined_at, dev.found_by = "joined", ts, how
+        dev.missed_checks, dev.left_at = 0, None
+        self.probes.pop(mac, None)
         verb = "rejoined" if existed else "joined"
         self._say(ts, "success", f"{self._label(mac)} {verb} the network with IP {ip}  [{how}]", mac)
 
@@ -169,7 +195,7 @@ class DeviceTracker:
 
     def add_existing(self, mac: str, ip: str, found_by: str, ts: float | None = None) -> bool:
         """Record a device that was already on the network. Returns True if it's new to us."""
-        ts = ts or time.time()
+        ts = time.time() if ts is None else ts
         if not is_unicast_mac(mac) or not self._in_subnet(ip):
             return False
         dev, created = self._upsert(mac, ip, ts, found_by=found_by)
@@ -178,15 +204,81 @@ class DeviceTracker:
         return created
 
     def handle(self, pkt) -> bool:
-        """Process one packet. Returns True if devices or the log changed."""
+        """Process one packet. Returns True if devices, statuses or the log changed."""
         ts = float(getattr(pkt, "time", None) or time.time())
-        before = (len(self.log), len(self.devices), len(self.pending))
+        before = (self._changes, len(self.pending))
+        self.clock = max(self.clock, ts)
         self._expire_pending(ts)
+        self._expire_probes(ts)
+
+        src = pkt[Ether].src.lower() if pkt.haslayer(Ether) else None
+        if src in self.devices:
+            # An ARP reply addressed to us is just an answer to our check-in, not activity.
+            answering = (pkt.haslayer(ARP) and pkt[ARP].op == 2
+                         and pkt[Ether].dst.lower() == self.self_mac)
+            self._seen(src, ts, active=not answering)
+
         if pkt.haslayer(DHCP) and pkt.haslayer(BOOTP):
             self._handle_dhcp(pkt, ts)
         elif pkt.haslayer(ARP):
             self._handle_arp(pkt, ts)
-        return before != (len(self.log), len(self.devices), len(self.pending))
+        elif (pkt.haslayer(IP) and src and is_unicast_mac(src)
+              and src not in self.devices and src not in self.pending
+              and self._in_subnet(pkt[IP].src)):
+            self.add_existing(src, pkt[IP].src, "IP traffic", ts)
+        return before != (self._changes, len(self.pending))
+
+    # -------------------------------------------------------- presence
+
+    def _seen(self, mac: str, ts: float, active: bool = True) -> None:
+        dev = self.devices[mac]
+        dev.last_seen = max(dev.last_seen, ts)
+        if active:
+            dev.last_active = max(dev.last_active, ts)
+        self.probes.pop(mac, None)
+        dev.missed_checks = 0
+        if dev.status in ("offline", "released"):
+            gone = f" after {int(ts - dev.left_at)}s away" if dev.left_at else ""
+            dev.status, dev.left_at = "online", None
+            self._say(ts, "success", f"{self._label(mac)} is back online{gone}", mac)
+        elif dev.status == "idle" and active:
+            dev.status = "online"
+            self._changes += 1
+
+    def _expire_probes(self, now: float) -> None:
+        for mac, asked in list(self.probes.items()):
+            if now - asked <= ARP_REPLY_TIMEOUT:
+                continue
+            del self.probes[mac]
+            dev = self.devices.get(mac)
+            if dev is None or dev.status in ("offline", "released"):
+                if dev:
+                    dev.missed_checks += 1
+                continue
+            dev.missed_checks += 1
+            self._changes += 1
+            if dev.missed_checks >= OFFLINE_AFTER_MISSES:
+                dev.status, dev.left_at = "offline", now
+                self._say(now, "leave", f"{self._label(mac)} left the network - no reply to "
+                                        f"{dev.missed_checks} ARP check-ins", mac)
+
+    def tick(self, now: float) -> bool:
+        """Advance the clock without a packet (live mode calls this every second)."""
+        before = self._changes
+        self.clock = max(self.clock, now)
+        self._expire_pending(now)
+        self._expire_probes(now)
+        for dev in self.devices.values():
+            if dev.role != "self" and dev.status == "online" and now - dev.last_active > IDLE_AFTER:
+                dev.status = "idle"
+                self._changes += 1
+        return before != self._changes
+
+    def checkin_targets(self, now: float, quiet_for: float) -> list[tuple[str, str]]:
+        """(ip, mac) of devices that have been quiet for `quiet_for` seconds and need a check-in."""
+        return [(d.ip, d.mac) for d in self.devices.values()
+                if d.role != "self" and d.ip and d.mac not in self.probes
+                and now - d.last_seen >= quiet_for]
 
     # ------------------------------------------------------------ DHCP
 
@@ -229,7 +321,7 @@ class DeviceTracker:
             self._say(ts, "warn", f"DHCP NAK: router refused the request from {label}", client)
         elif kind == "Release":
             if dev := self.devices.get(client):
-                dev.status, dev.last_seen = "released", ts
+                dev.status, dev.left_at = "released", ts
             self.pending.pop(client, None)
             self._say(ts, "info", f"DHCP Release: {label} gave its IP back (leaving)", client)
 
@@ -253,6 +345,14 @@ class DeviceTracker:
             return
         sender_ip, target_ip = arp.psrc, arp.pdst
 
+        # Our own "are you still there?" check-in: start waiting for an answer.
+        if arp.op == 1 and mac == self.self_mac and target_ip != sender_ip:
+            target = next((d for d in self.devices.values()
+                           if d.ip == target_ip and d.role != "self"), None)
+            if target:
+                self.probes.setdefault(target.mac, ts)
+            return
+
         # A device that just got an IP probes (sender 0.0.0.0) then announces it.
         if (p := self.pending.get(mac)) and p.requested_ip:
             if sender_ip == p.requested_ip or (sender_ip == "0.0.0.0" and target_ip == p.requested_ip):
@@ -273,6 +373,7 @@ class DeviceTracker:
         role_order = {"router": 0, "self": 1, "device": 2}
         devices = sorted(self.devices.values(), key=lambda d: (role_order[d.role], d.first_seen))
         return {
+            "clock": self.clock,
             "devices": [d.to_dict() for d in devices],
             "pending": [asdict(p) for p in self.pending.values()],
             "log": [asdict(e) for e in self.log],

@@ -7,7 +7,9 @@ It plays out on a fictional network 192.168.50.0/24:
   * a tablet reconnects (skips Discover, sends Request)   -> confirmed by ACK,
   * then normal traffic: DNS (failing - the router has no internet), a ping,
     an mDNS query, and an HTTP login to the router's admin page. Click that
-    POST in the packet table: the password is readable, because HTTP isn't encrypted.
+    POST in the packet table: the password is readable, because HTTP isn't encrypted,
+  * finally PacketLens (this Mac, .5) sends ARP check-ins: the TV answers, the
+    phone doesn't answer three in a row -> the phone has left the network.
 
 Write it to a file and open it in Wireshark to compare:
     python -m packetlens.demo samples/demo.pcap
@@ -27,6 +29,7 @@ from scapy.utils import wrpcap
 
 SUBNET = "192.168.50.0/24"
 ROUTER_IP, ROUTER_MAC = "192.168.50.1", "00:00:5e:00:53:01"  # documentation MAC (RFC 7042)
+SELF_IP, SELF_MAC = "192.168.50.5", "00:00:5e:00:53:05"      # the Mac running PacketLens
 BCAST = "ff:ff:ff:ff:ff:ff"
 
 LAPTOP = ("192.168.50.10", "3c:22:fb:10:10:10")
@@ -61,6 +64,11 @@ def _dhcp_from_router(mac: str, msg: str, ip: str, xid: int, broadcast: bool):
 
 def _arp(src_mac: str, src_ip: str, target_ip: str, op: int = 1):
     return Ether(src=src_mac, dst=BCAST) / ARP(op=op, hwsrc=src_mac, psrc=src_ip, pdst=target_ip)
+
+
+def _checkin(device: tuple):
+    """This Mac asking a device 'are you still at your IP?' (broadcast ARP request)."""
+    return Ether(src=SELF_MAC, dst=BCAST) / ARP(op=1, hwsrc=SELF_MAC, psrc=SELF_IP, pdst=device[0])
 
 
 def _ip(src: tuple, dst: tuple):
@@ -128,6 +136,16 @@ def build_demo_packets(start: float = 1_700_000_000.0) -> list:
         (21.0, _ip(NEW_LAPTOP, router) / ICMP(type=8, id=0x4c, seq=1) / Raw(b"ping-demo-payload")),
         (21.01, _ip(router, NEW_LAPTOP) / ICMP(type=0, id=0x4c, seq=1) / Raw(b"ping-demo-payload")),
         *[(23.0 + t, pkt) for t, pkt in _web_session(NEW_LAPTOP, router)],
+
+        # ARP check-ins from this Mac. The TV answers; the phone has walked away.
+        (28.0, _checkin(TV)),
+        (28.02, Ether(src=TV[1], dst=SELF_MAC) / ARP(op=2, hwsrc=TV[1], psrc=TV[0],
+                                                     hwdst=SELF_MAC, pdst=SELF_IP)),
+        (30.0, _checkin(PHONE)),
+        (36.0, _checkin(PHONE)),
+        (42.0, _checkin(PHONE)),
+        (48.0, _ip(TABLET, mdns) / UDP(sport=5353, dport=5353)
+               / DNS(id=0, qd=DNSQR(qname="_companion-link._tcp.local", qtype="PTR"))),
     ]
     packets = []
     for offset, pkt in timeline:

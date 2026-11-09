@@ -5,6 +5,7 @@ Run:  .venv/bin/python -m unittest discover -s tests -v
 
 import unittest
 
+from scapy.layers.inet import IP, UDP
 from scapy.layers.l2 import ARP, Ether
 
 from packetlens import demo
@@ -12,7 +13,8 @@ from packetlens.tracker import DeviceTracker
 
 
 def run_demo() -> DeviceTracker:
-    t = DeviceTracker(router_ip=demo.ROUTER_IP, router_mac=demo.ROUTER_MAC, subnet=demo.SUBNET)
+    t = DeviceTracker(router_ip=demo.ROUTER_IP, router_mac=demo.ROUTER_MAC,
+                      self_ip=demo.SELF_IP, self_mac=demo.SELF_MAC, subnet=demo.SUBNET)
     for pkt in demo.build_demo_packets():
         t.handle(pkt)
     return t
@@ -85,6 +87,107 @@ class TestEdgeCases(unittest.TestCase):
         t = DeviceTracker(subnet=demo.SUBNET)
         t.handle(Ether(src="10:22:33:44:55:66") / ARP(hwsrc="10:22:33:44:55:66", psrc="10.0.0.5"))
         self.assertEqual(t.devices, {})
+
+    def test_device_found_from_ip_traffic(self):
+        t = DeviceTracker(subnet=demo.SUBNET)
+        t.handle(Ether(bytes(Ether(src="10:22:33:44:55:66") / IP(src="192.168.50.44", dst="192.168.50.1"))))
+        self.assertEqual(t.devices["10:22:33:44:55:66"].found_by, "IP traffic")
+
+
+# --------------------------------------------------------------- presence
+
+ME = (demo.SELF_IP, demo.SELF_MAC)
+TV = demo.TV
+
+
+def at(pkt, ts):
+    pkt = Ether(bytes(pkt))
+    pkt.time = ts
+    return pkt
+
+
+def checkin(device, ts):
+    return at(Ether(src=ME[1], dst=device[1]) / ARP(op=1, hwsrc=ME[1], psrc=ME[0], pdst=device[0]), ts)
+
+
+def reply(device, ts):
+    return at(Ether(src=device[1], dst=ME[1]) / ARP(op=2, hwsrc=device[1], psrc=device[0],
+                                                    hwdst=ME[1], pdst=ME[0]), ts)
+
+
+def chatter(device, ts):
+    """The device sending something on its own (a DNS query to the router)."""
+    return at(Ether(src=device[1], dst=demo.ROUTER_MAC) / IP(src=device[0], dst=demo.ROUTER_IP)
+              / UDP(sport=5000, dport=53), ts)
+
+
+class TestPresence(unittest.TestCase):
+    def setUp(self):
+        self.t = DeviceTracker(router_ip=demo.ROUTER_IP, router_mac=demo.ROUTER_MAC,
+                               self_ip=ME[0], self_mac=ME[1], subnet=demo.SUBNET)
+        self.t.add_existing(TV[1], TV[0], "ARP scan", ts=0.0)
+        self.tv = self.t.devices[TV[1]]
+
+    def miss(self, start, times):
+        for i in range(times):
+            self.t.handle(checkin(TV, start + i * 30))
+        self.t.tick(start + times * 30)
+
+    def test_demo_phone_goes_offline(self):
+        t = run_demo()
+        self.assertEqual(t.devices[demo.PHONE[1]].status, "offline")
+        self.assertEqual(t.devices[demo.TV[1]].status, "online")
+        self.assertTrue(any(e.level == "leave" and "Pixel-8" in e.text for e in t.log))
+
+    def test_answered_checkin_resets_misses(self):
+        self.t.handle(checkin(TV, 100))
+        self.t.tick(106)
+        self.assertEqual(self.tv.missed_checks, 1)
+        self.t.handle(checkin(TV, 130))
+        self.t.handle(reply(TV, 130.2))
+        self.t.tick(140)
+        self.assertEqual((self.tv.missed_checks, self.tv.status), (0, "idle"))
+
+    def test_three_misses_means_offline(self):
+        self.miss(100, 2)
+        self.assertNotEqual(self.tv.status, "offline")
+        self.miss(160, 1)
+        self.assertEqual(self.tv.status, "offline")
+        self.assertEqual(self.t.log[-1].level, "leave")
+
+    def test_any_packet_brings_it_back(self):
+        self.miss(100, 3)
+        self.t.handle(chatter(TV, 500))
+        self.assertEqual(self.tv.status, "online")
+        self.assertIn("back online", self.t.log[-1].text)
+
+    def test_idle_when_quiet_but_answering(self):
+        self.t.handle(chatter(TV, 100))
+        self.t.tick(100 + 61)
+        self.assertEqual(self.tv.status, "idle")
+        self.t.handle(chatter(TV, 200))
+        self.assertEqual(self.tv.status, "online")
+
+    def test_only_our_own_questions_count(self):
+        router_asks = at(Ether(src=demo.ROUTER_MAC, dst="ff:ff:ff:ff:ff:ff")
+                         / ARP(op=1, hwsrc=demo.ROUTER_MAC, psrc=demo.ROUTER_IP, pdst=TV[0]), 100)
+        for i in range(5):
+            router_asks.time = 100 + i * 30
+            self.t.handle(router_asks)
+        self.t.tick(400)
+        self.assertEqual(self.tv.missed_checks, 0)
+
+    def test_release_marks_left(self):
+        release = demo._dhcp_from_client(TV[1], "release", b"tv", 9)
+        release.time = 100
+        self.t.handle(release)
+        self.assertEqual(self.tv.status, "released")
+
+    def test_checkin_targets_skip_recent_and_self(self):
+        self.t.handle(chatter(TV, 100))
+        self.assertNotIn((TV[0], TV[1]), self.t.checkin_targets(110, 30))   # talked 10s ago
+        self.assertIn((TV[0], TV[1]), self.t.checkin_targets(140, 30))      # quiet for 40s
+        self.assertNotIn((ME[0], ME[1]), self.t.checkin_targets(10_000, 30))
 
 
 if __name__ == "__main__":
