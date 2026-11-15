@@ -16,9 +16,11 @@
               stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
       <span class="brand-name">PacketLens</span>
-      <span class="step-tag">Step 3 · Presence</span>
+      <span class="step-tag">Step 4 · Device details</span>
     </div>
+    <div class="stats" id="stats" aria-label="Network at a glance"></div>
     <div class="status" id="status"><span class="status-dot"></span><span id="status-text">Connecting…</span></div>
+    <button id="theme-btn" class="btn ghost" title="Theme">Auto</button>
     <button id="scan-btn" class="btn" disabled>Rescan network</button>
   </header>
 
@@ -37,8 +39,27 @@
       <section class="card grow">
         <div class="card-head">
           <h2>Devices <span class="count" id="device-count">0</span></h2>
+          <span class="hint">click for details</span>
+        </div>
+        <div class="toolbar">
+          <input id="dev-search" type="search" spellcheck="false" autocomplete="off"
+                 placeholder="Search devices: name, IP, MAC, vendor…" aria-label="Search devices">
+          <select id="dev-filter" aria-label="Show which devices">
+            <option value="all">All</option>
+            <option value="online">Online</option>
+            <option value="idle">Idle</option>
+            <option value="offline">Offline</option>
+            <option value="joined">Joined</option>
+            <option value="private">Private MAC</option>
+          </select>
+          <select id="dev-sort" aria-label="Sort devices">
+            <option value="ip">By IP</option>
+            <option value="recent">Recent</option>
+            <option value="name">By name</option>
+          </select>
         </div>
         <ul class="device-list" id="device-list"></ul>
+        <p class="table-empty" id="device-empty" hidden>No devices match.</p>
       </section>
     </aside>
 
@@ -46,12 +67,14 @@
       <div class="card topo-card">
         <div class="card-head">
           <h2>Live topology</h2>
+          <button id="topo-collapse" class="btn small" hidden title="Fold the quiet devices back into one bubble">Collapse</button>
           <ul class="legend">
             <li><span class="swatch router"></span>Router</li>
             <li><span class="swatch self"></span>You</li>
             <li title="Already connected when PacketLens started"><span class="swatch existing"></span>Existing</li>
             <li title="Seen joining via DHCP"><span class="swatch joined"></span>Joined</li>
             <li title="Stopped answering ARP check-ins, or sent a DHCP Release"><span class="swatch offline"></span>Offline</li>
+            <li title="Quietly connected devices, folded into one bubble - click it to expand"><span class="swatch group"></span>Grouped</li>
           </ul>
         </div>
         <svg id="topo" role="img" aria-label="Network topology"></svg>
@@ -84,18 +107,27 @@
 
       <div class="card log-card">
         <div class="card-head">
-          <h2>Join activity</h2>
-          <span class="hint">DHCP and ARP steps, newest first</span>
+          <div class="tabs" id="log-tabs" role="tablist" aria-label="Activity filter">
+            <button class="tab active" data-filter="all" role="tab">Activity</button>
+            <button class="tab" data-filter="joins" role="tab">Joins</button>
+            <button class="tab" data-filter="leaves" role="tab">Leaves</button>
+            <button class="tab" data-filter="alerts" role="tab">Alerts <span class="count warn" id="alerts-count" hidden></span></button>
+          </div>
+          <span class="hint">newest first</span>
         </div>
         <ol class="log" id="log"></ol>
       </div>
 
       <div class="card detail-card">
         <div class="card-head">
-          <h2>Packet details</h2>
-          <span class="hint" id="detail-hint">Click a packet to decode it</span>
+          <div class="tabs" role="tablist" aria-label="Details">
+            <button class="tab" id="tab-device" role="tab" data-tab="device" aria-controls="device-detail">Device details</button>
+            <button class="tab" id="tab-packet" role="tab" data-tab="packet" aria-controls="detail">Packet details</button>
+          </div>
+          <span class="hint" id="detail-hint"></span>
         </div>
-        <div class="detail" id="detail"></div>
+        <div class="device-detail" id="device-detail" role="tabpanel" hidden></div>
+        <div class="detail" id="detail" role="tabpanel"></div>
       </div>
     </section>
   </main>

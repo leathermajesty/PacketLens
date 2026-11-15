@@ -6,7 +6,7 @@ It plays out on a fictional network 192.168.50.0/24:
   * a laptop joins but the ACK is unicast (we don't see it) -> confirmed by ARP,
   * a tablet reconnects (skips Discover, sends Request)   -> confirmed by ACK,
   * then normal traffic: DNS (failing - the router has no internet), a ping,
-    an mDNS query, and an HTTP login to the router's admin page. Click that
+    an mDNS query, the TV naming itself over mDNS, and an HTTP login to the router's admin page. Click that
     POST in the packet table: the password is readable, because HTTP isn't encrypted,
   * finally PacketLens (this Mac, .5) sends ARP check-ins: the TV answers, the
     phone doesn't answer three in a row -> the phone has left the network.
@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 from scapy.layers.dhcp import BOOTP, DHCP
-from scapy.layers.dns import DNS, DNSQR
+from scapy.layers.dns import DNS, DNSQR, DNSRR
 from scapy.layers.inet import ICMP, IP, TCP, UDP
 from scapy.layers.l2 import ARP, Ether
 from scapy.packet import Raw
@@ -37,14 +37,18 @@ TV = ("192.168.50.20", "a4:30:7a:20:20:20")
 PHONE = ("192.168.50.101", "da:91:4e:aa:01:01", b"Pixel-8")
 NEW_LAPTOP = ("192.168.50.102", "f0:18:98:bb:02:02", b"Lab-Laptop")
 TABLET = ("192.168.50.103", "a2:c5:11:cc:03:03", b"iPad")
+ANDROID = b"android-dhcp-14"
 
 
 def _mac_bytes(mac: str) -> bytes:
     return bytes.fromhex(mac.replace(":", ""))
 
 
-def _dhcp_from_client(mac: str, msg: str, hostname: bytes, xid: int, requested: str | None = None):
-    opts = [("message-type", msg), ("hostname", hostname), ("vendor_class_id", b"android-dhcp-14")]
+def _dhcp_from_client(mac: str, msg: str, hostname: bytes, xid: int, requested: str | None = None,
+                      vendor_class: bytes | None = None):
+    opts = [("message-type", msg), ("hostname", hostname)]
+    if vendor_class:  # Android and Windows send one; Apple devices don't
+        opts.append(("vendor_class_id", vendor_class))
     if requested:
         opts += [("requested_addr", requested), ("server_id", ROUTER_IP)]
     return (Ether(src=mac, dst=BCAST) / IP(src="0.0.0.0", dst="255.255.255.255")
@@ -110,9 +114,10 @@ def build_demo_packets(start: float = 1_700_000_000.0) -> list:
         (1.5, _arp(TV[1], TV[0], ROUTER_IP)),
 
         # Phone joins - full DORA, router broadcasts Offer and ACK.
-        (4.0, _dhcp_from_client(PHONE[1], "discover", PHONE[2], 0x1001)),
+        (4.0, _dhcp_from_client(PHONE[1], "discover", PHONE[2], 0x1001, vendor_class=ANDROID)),
         (4.2, _dhcp_from_router(PHONE[1], "offer", PHONE[0], 0x1001, broadcast=True)),
-        (4.5, _dhcp_from_client(PHONE[1], "request", PHONE[2], 0x1001, requested=PHONE[0])),
+        (4.5, _dhcp_from_client(PHONE[1], "request", PHONE[2], 0x1001, requested=PHONE[0],
+                                vendor_class=ANDROID)),
         (4.7, _dhcp_from_router(PHONE[1], "ack", PHONE[0], 0x1001, broadcast=True)),
 
         # New laptop joins - Offer/ACK go only to the laptop, so we never capture them.
@@ -133,6 +138,11 @@ def build_demo_packets(start: float = 1_700_000_000.0) -> list:
                / DNS(id=0x1a2b, qr=1, ra=1, rcode=2, qd=DNSQR(qname="connectivitycheck.gstatic.com"))),
         (20.0, _ip(TABLET, mdns) / UDP(sport=5353, dport=5353)
                / DNS(id=0, qd=DNSQR(qname="_airplay._tcp.local", qtype="PTR"))),
+        (20.2, _ip(TV, mdns) / UDP(sport=5353, dport=5353)
+               / DNS(id=0, qr=1, aa=1, qd=[], an=[
+                   DNSRR(rrname="_airplay._tcp.local", type="PTR", ttl=4500,
+                         rdata="Living-Room-TV._airplay._tcp.local"),
+                   DNSRR(rrname="Living-Room-TV.local", type="A", ttl=120, rdata=TV[0])])),
         (21.0, _ip(NEW_LAPTOP, router) / ICMP(type=8, id=0x4c, seq=1) / Raw(b"ping-demo-payload")),
         (21.01, _ip(router, NEW_LAPTOP) / ICMP(type=0, id=0x4c, seq=1) / Raw(b"ping-demo-payload")),
         *[(23.0 + t, pkt) for t, pkt in _web_session(NEW_LAPTOP, router)],

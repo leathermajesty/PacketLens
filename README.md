@@ -5,7 +5,7 @@ and, later, to spot attacks on it.
 
 A live dashboard showing your Wi-Fi network, the devices already on it, a topology map that
 adds a new device the moment the router gives it an IP address (and fades it out when it
-leaves), and a Wireshark-style live packet table with a details pane.
+leaves), a details panel for every device, and a Wireshark-style live packet table.
 
 ## Quick start (macOS)
 
@@ -47,6 +47,27 @@ Wi-Fi (en0) ──► sniffer (scapy) ┤   (ARP + DHCP)     ├─► local web
                                 └─► packet buffer ───┘   Server-Sent Events   devices, topology,
                                     (last 2,000)                              packets, details
 ```
+
+### Reading the dashboard
+
+- **Top bar:** devices online / idle / offline / joined, the number of alerts, and packets per
+  second. Click a number to filter the device list (or the activity log, for alerts).
+- **Live topology** stays calm on purpose. On a small network every device is drawn; on a big
+  one (more than 12 devices) only the router, this Mac and devices that **joined or left
+  recently** are drawn, and everything else folds into one **"N quiet devices"** bubble.
+  Click the bubble to expand it, click any dot for its name, MAC and details, *Collapse* to fold
+  it back. Only devices with a known name get a label; MAC addresses appear only on the selected
+  device.
+- **Devices** list: search by name, IP, MAC, vendor or type; filter by status; sort by IP,
+  recent activity or name. Click a device for its details.
+- **Activity** has tabs: *Joins* (the DHCP steps), *Leaves*, and *Alerts* (rogue DHCP, refused
+  or unconfirmed requests). Click an entry to jump to that device.
+- **Theme:** the *Auto / Light / Dark* button in the top bar.
+
+**On a network you don't own** (a campus or office Wi-Fi), run passively:
+`.venv/bin/python -m packetlens --no-scan --checkin 0`. Listening to broadcasts is harmless, but
+the ARP scan and the check-ins send packets to everyone's devices. Subnets bigger than /22 are
+never scanned anyway.
 
 ### The live packet table
 
@@ -98,7 +119,9 @@ Because the ACK is often unicast, PacketLens adds a device to the topology when 
   (devices do this right after getting an IP, to check nobody else is using it).
 
 A Request with no confirmation within 60 seconds is dropped. If a DHCP Offer or ACK comes from
-anything other than your router, PacketLens warns about a **possible rogue DHCP server**.
+anything other than your router, PacketLens warns about a **possible rogue DHCP server** (once
+every 5 minutes per server, not once per packet). On big networks this is often a second,
+legitimate DHCP server - telling the two apart is a Step 7 job.
 
 ### Detecting a device leaving
 
@@ -140,6 +163,32 @@ Only monitor mode sees the actual "goodbye" frame.
 To see the same packets in Wireshark, use the display filter `dhcp || arp`. The demo capture is
 in `samples/demo.pcap` (regenerate it with `.venv/bin/python -m packetlens.demo`).
 
+### Device details
+
+Click a device in the list or on the topology to see what PacketLens knows about it:
+
+| Field | Where it comes from |
+|---|---|
+| **Vendor** | The first 3 bytes of the MAC (the *OUI*) are assigned to manufacturers by the IEEE. PacketLens uses the table that ships with scapy (from Wireshark), so it works offline |
+| **Announced name** | The *hostname* the device put in its DHCP request (option 12), or the name it announced over **mDNS** ("Living-Room-TV.local is at 192.168.1.20"). The DHCP name wins if both exist |
+| **Looks like** | A guess from the DHCP *vendor class* (option 60: `android-dhcp-14` → Android 14, `MSFT 5.0` → Windows) or the name (`iPhone`, `DESKTOP-…`) |
+| **MAC type** | *Private* if the "locally administered" bit is set: the MAC is random, so the vendor is hidden |
+| **First / last seen** | When PacketLens first and last saw a packet from it |
+| **IP address** | Current IP and any earlier ones. A device changing IP is logged |
+| **Packets** | Packets and bytes it sent and received **that your Mac could see** |
+| **History** | Its joins, departures, renames and IP changes from the activity log |
+
+- **Show its packets** filters the packet table to that device's MAC address.
+- **Name it** gives a device your own nickname. It is saved in your browser only, not sent anywhere.
+
+Everything here is something the device **says about itself**, so any of it can be faked:
+a laptop can call itself `iPhone`, and an attacker can copy another device's MAC address.
+That's why later steps look at *behaviour* (Step 7).
+
+Why are the packet counts so low? On Wi-Fi your Mac only receives broadcasts, multicasts and
+traffic addressed to it. Other devices' private traffic, like their web browsing, is never
+delivered to you (unlike an old Ethernet hub). Monitor mode (Step 6) captures more of the air.
+
 ### Things you'll notice
 
 - **"private MAC"**: phones use a random MAC per Wi-Fi network (the "locally administered" bit
@@ -156,7 +205,8 @@ packetlens/
   __main__.py   command line, starts everything
   netinfo.py    interface, IP/MAC, router, Wi-Fi details (macOS tools)
   scanner.py    ARP scan of the subnet, ARP check-ins
-  tracker.py    the device list: "joined with an IP" rule and online/idle/offline presence
+  tracker.py    the device list: "joined with an IP" rule, presence, names, IP history
+  vendors.py    MAC vendor lookup (OUI) and "looks like" guesses
   packets.py    packet table rows + Wireshark-style layer details and hex dump
   engine.py     live capture / replay, packet buffer, feeds the tracker
   server.py     local web server + live updates
@@ -177,8 +227,10 @@ Run the tests:
 - [x] **Step 1:** Wi-Fi info, existing devices, live topology, new device on DHCP IP assignment
 - [x] **Step 2:** live packet table beside the topology, packet details + hex dump, filter
 - [x] **Step 3:** presence: online / idle / offline via ARP check-ins, devices fade when they leave
-- [ ] **Step 4:** device details on click (vendor, hostname, first/last seen)
-- [ ] **Step 5:** traffic on the topology (links flash, byte counters)
+- [x] **Step 4:** device details on click: vendor, announced name (DHCP/mDNS), type guess,
+  first/last seen, IP history, packet counts, nicknames; dashboard that scales to hundreds of
+  devices (grouped topology, search/filter, stats, alerts tab, theme)
+- [ ] **Step 5:** traffic on the topology (links flash when devices talk, busiest devices)
 - [ ] **Step 6:** monitor mode: the WPA2 4-way handshake ("device entered the right password")
   and deauthentication frames ("device disconnected" - or a deauth attack)
 - [ ] **Step 7:** attack detection: ARP spoofing, port scans, rogue DHCP

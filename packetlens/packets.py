@@ -57,7 +57,12 @@ def _dns_info(dns) -> str:
     if dns.qr:
         if dns.rcode:
             text += f"  {DNS_ERRORS.get(dns.rcode, f'error {dns.rcode}')}"
-        answers = [_dns_name(rr.rdata) for rr in list(dns.an or [])[:3] if hasattr(rr, "rdata")]
+        records = [rr for rr in list(dns.an or [])[:3] if hasattr(rr, "rdata")]
+        if q:
+            answers = [_dns_name(rr.rdata) for rr in records]
+        else:  # unsolicited answer (mDNS announcement): say what each record is about
+            answers = [f"{_dns_name(rr.rrname)} {dnsqtypes.get(rr.type, rr.type)} {_dns_name(rr.rdata)}"
+                       for rr in records]
         if answers:
             text += "  → " + ", ".join(answers)
     return text

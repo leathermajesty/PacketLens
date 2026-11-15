@@ -5,11 +5,13 @@ Run:  .venv/bin/python -m unittest discover -s tests -v
 
 import unittest
 
+from scapy.layers.dns import DNS, DNSRR
 from scapy.layers.inet import IP, UDP
 from scapy.layers.l2 import ARP, Ether
 
 from packetlens import demo
 from packetlens.tracker import DeviceTracker
+from packetlens.vendors import guess_kind, lookup_vendor
 
 
 def run_demo() -> DeviceTracker:
@@ -82,6 +84,20 @@ class TestEdgeCases(unittest.TestCase):
         offer[Ether].src = "66:66:66:66:66:66"
         t.handle(offer)
         self.assertTrue(any("rogue" in e.text for e in t.log))
+
+    def test_rogue_warning_is_not_repeated_every_packet(self):
+        t = DeviceTracker(router_mac=demo.ROUTER_MAC, subnet=demo.SUBNET)
+        for i in range(5):
+            offer = demo._dhcp_from_router("aa:bb:cc:00:00:01", "offer", "192.168.50.77", i, broadcast=True)
+            offer[Ether].src = "66:66:66:66:66:66"
+            offer.time = 100 + i * 10
+            t.handle(offer)
+        self.assertEqual(sum("rogue" in e.text for e in t.log), 1)
+        late = demo._dhcp_from_router("aa:bb:cc:00:00:01", "ack", "192.168.50.77", 9, broadcast=True)
+        late[Ether].src = "66:66:66:66:66:66"
+        late.time = 100 + 600
+        t.handle(late)
+        self.assertEqual(sum("rogue" in e.text for e in t.log), 2)
 
     def test_arp_outside_subnet_ignored(self):
         t = DeviceTracker(subnet=demo.SUBNET)
@@ -188,6 +204,72 @@ class TestPresence(unittest.TestCase):
         self.assertNotIn((TV[0], TV[1]), self.t.checkin_targets(110, 30))   # talked 10s ago
         self.assertIn((TV[0], TV[1]), self.t.checkin_targets(140, 30))      # quiet for 40s
         self.assertNotIn((ME[0], ME[1]), self.t.checkin_targets(10_000, 30))
+
+
+# ---------------------------------------------------------------- details
+
+def mdns_name(device, name, ts):
+    """The device announcing '<name>.local is at <its IP>' over mDNS."""
+    return at(Ether(src=device[1], dst="01:00:5e:00:00:fb") / IP(src=device[0], dst="224.0.0.251")
+              / UDP(sport=5353, dport=5353)
+              / DNS(qr=1, aa=1, qd=[], an=[DNSRR(rrname=f"{name}.local", type="A", rdata=device[0])]), ts)
+
+
+class TestDetails(unittest.TestCase):
+    def setUp(self):
+        self.t = DeviceTracker(router_ip=demo.ROUTER_IP, router_mac=demo.ROUTER_MAC,
+                               self_ip=ME[0], self_mac=ME[1], subnet=demo.SUBNET)
+        self.t.add_existing(TV[1], TV[0], "ARP scan", ts=0.0)
+        self.tv = self.t.devices[TV[1]]
+
+    def test_vendor_from_mac_prefix(self):
+        self.assertEqual(lookup_vendor("3c:22:fb:10:10:10"), "Apple, Inc.")
+        self.assertIn("Samsung", self.tv.vendor)
+        self.assertIsNone(lookup_vendor(demo.PHONE[1]))   # private MAC: no real vendor
+
+    def test_demo_details(self):
+        t = run_demo()
+        phone, tv, tablet = (t.devices[m] for m in (demo.PHONE[1], demo.TV[1], demo.TABLET[1]))
+        self.assertEqual((phone.kind, phone.hostname_source), ("Android 14", "DHCP"))
+        self.assertEqual((tv.hostname, tv.hostname_source), ("Living-Room-TV", "mDNS"))
+        self.assertEqual(tablet.kind, "iPad")
+
+    def test_mdns_names_a_device(self):
+        self.t.handle(mdns_name(TV, "Living-Room-TV", 100))
+        self.assertEqual((self.tv.hostname, self.tv.hostname_source), ("Living-Room-TV", "mDNS"))
+        self.assertEqual(self.tv.kind, "TV / streaming")
+
+    def test_mdns_answer_about_another_ip_is_ignored(self):
+        pkt = mdns_name(TV, "Someone-Else", 100)
+        pkt[DNS].an[0].rdata = "192.168.50.99"
+        self.t.handle(Ether(bytes(pkt)))
+        self.assertIsNone(self.tv.hostname)
+
+    def test_dhcp_name_beats_mdns_name(self):
+        req = demo._dhcp_from_client(TV[1], "request", b"Samsung-TV", 7, requested=TV[0])
+        req.time = 100
+        self.t.handle(req)
+        self.t.handle(mdns_name(TV, "Living-Room-TV", 110))
+        self.assertEqual((self.tv.hostname, self.tv.hostname_source), ("Samsung-TV", "DHCP"))
+
+    def test_ip_change_is_remembered_and_logged(self):
+        self.t.handle(at(Ether(src=TV[1], dst="ff:ff:ff:ff:ff:ff")
+                         / ARP(op=1, hwsrc=TV[1], psrc="192.168.50.77", pdst=demo.ROUTER_IP), 100))
+        self.assertEqual(self.tv.ip, "192.168.50.77")
+        self.assertEqual([ip for ip, _ in self.tv.ip_history], [TV[0], "192.168.50.77"])
+        self.assertIn("changed IP from 192.168.50.20 to 192.168.50.77", self.t.log[-1].text)
+
+    def test_packet_counters(self):
+        self.t.handle(chatter(TV, 100))
+        self.t.handle(reply(TV, 101))
+        router = self.t.devices[demo.ROUTER_MAC]
+        self.assertEqual((self.tv.packets_sent, router.packets_received), (2, 1))
+        self.assertGreater(self.tv.bytes_sent, 0)
+
+    def test_guess_kind(self):
+        self.assertEqual(guess_kind("MSFT 5.0", "DESKTOP-AB12"), ("Windows", 'DHCP vendor class "MSFT 5.0"'))
+        self.assertEqual(guess_kind(None, "Johns-iPhone")[0], "iPhone")
+        self.assertIsNone(guess_kind(None, "Lab-Laptop"))
 
 
 if __name__ == "__main__":

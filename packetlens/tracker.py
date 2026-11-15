@@ -35,10 +35,12 @@ from collections import deque
 from dataclasses import asdict, dataclass, field
 
 from scapy.layers.dhcp import BOOTP, DHCP
-from scapy.layers.inet import IP
+from scapy.layers.dns import DNS
+from scapy.layers.inet import IP, UDP
 from scapy.layers.l2 import ARP, Ether
 
 from .netinfo import is_randomized_mac, is_unicast_mac
+from .vendors import guess_kind, lookup_vendor
 
 DHCP_TYPES = {1: "Discover", 2: "Offer", 3: "Request", 4: "Decline",
               5: "ACK", 6: "NAK", 7: "Release", 8: "Inform"}
@@ -47,6 +49,8 @@ IDLE_AFTER = 60.0           # quiet this long -> "idle"
 ARP_REPLY_TIMEOUT = 5.0     # a check-in with no answer after this long is a miss
 OFFLINE_AFTER_MISSES = 3    # this many misses in a row -> "offline"
 LOG_SIZE = 300
+WARN_REPEAT = 300.0         # repeat the same "rogue DHCP" warning at most every 5 minutes
+IP_HISTORY = 10             # IP addresses remembered per device
 
 
 @dataclass
@@ -66,6 +70,16 @@ class Device:
     status: str = "online"        # "online" | "idle" | "offline" | "released"
     missed_checks: int = 0
     randomized_mac: bool = False
+    # Step 4: details
+    hostname_source: str | None = None   # "DHCP" (it told the router) | "mDNS" (it announced itself)
+    vendor: str | None = None            # manufacturer, from the MAC's first 3 bytes
+    kind: str | None = None              # best guess: "Android 14", "iPhone", "Windows"...
+    kind_reason: str | None = None
+    ip_history: list = field(default_factory=list)   # [[ip, since], ...], newest last
+    packets_sent: int = 0                # only what this Mac can see (see README)
+    packets_received: int = 0
+    bytes_sent: int = 0
+    bytes_received: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -125,6 +139,7 @@ class DeviceTracker:
     def __post_init__(self):
         self._net = ipaddress.ip_network(self.subnet, strict=False) if self.subnet else None
         self._changes = 0
+        self._warned: dict[str, float] = {}      # rogue DHCP server mac -> last warning time
         now = time.time()
         if self.router_mac:
             self._upsert(self.router_mac, self.router_ip, now, role="router", found_by="Default gateway")
@@ -155,20 +170,44 @@ class DeviceTracker:
         dev = self.devices.get(mac)
         created = dev is None
         if created:
-            dev = Device(mac=mac, first_seen=ts, last_active=ts, randomized_mac=is_randomized_mac(mac))
+            dev = Device(mac=mac, first_seen=ts, last_active=ts, randomized_mac=is_randomized_mac(mac),
+                         vendor=lookup_vendor(mac))
             if mac == self.router_mac:
                 dev.role = "router"
             elif mac == self.self_mac:
                 dev.role = "self"
             self.devices[mac] = dev
             self._changes += 1
-        if ip:
+        if ip and ip != dev.ip:
+            if dev.ip and dev.role == "device":
+                self._say(ts, "info", f"{self._label(mac)} changed IP from {dev.ip} to {ip}", mac)
             dev.ip = ip
+            dev.ip_history = (dev.ip_history + [[ip, ts]])[-IP_HISTORY:]
         dev.last_seen = max(dev.last_seen, ts)
+        hostname = fields.pop("hostname", None)
         for key, value in fields.items():
             if value is not None and (key != "found_by" or created):
                 setattr(dev, key, value)
+        if created or fields.get("vendor_class"):
+            self._update_kind(dev)
+        if hostname:
+            self._set_hostname(dev, hostname, "DHCP", ts)
         return dev, created
+
+    def _set_hostname(self, dev: Device, name: str, source: str, ts: float) -> None:
+        """DHCP names win over mDNS names: the device gave them to the router itself."""
+        if dev.hostname == name or (dev.hostname_source == "DHCP" and source != "DHCP"):
+            return
+        dev.hostname, dev.hostname_source = name, source
+        self._update_kind(dev)
+        self._changes += 1
+        if source != "DHCP":
+            self._say(ts, "info", f"{dev.mac} calls itself {name}  [{source}]", dev.mac)
+
+    @staticmethod
+    def _update_kind(dev: Device) -> None:
+        guess = guess_kind(dev.vendor_class, dev.hostname)
+        dev.kind, dev.kind_reason = guess if guess else (None, None)
 
     def _expire_pending(self, now: float) -> None:
         for mac, p in list(self.pending.items()):
@@ -226,7 +265,35 @@ class DeviceTracker:
               and src not in self.devices and src not in self.pending
               and self._in_subnet(pkt[IP].src)):
             self.add_existing(src, pkt[IP].src, "IP traffic", ts)
+
+        if src in self.devices and pkt.haslayer(DNS) and pkt.haslayer(UDP) and pkt[UDP].sport == 5353:
+            self._handle_mdns(src, pkt, ts)
+        if pkt.haslayer(Ether):
+            self._count(src, (pkt[Ether].dst or "").lower(), len(pkt))
         return before != (self._changes, len(self.pending))
+
+    def _count(self, src: str | None, dst: str, size: int) -> None:
+        """Packet/byte counters (no change bump: the 2 s heartbeat shows them)."""
+        if dev := self.devices.get(src):
+            dev.packets_sent += 1
+            dev.bytes_sent += size
+        if dst != src and (dev := self.devices.get(dst)):
+            dev.packets_received += 1
+            dev.bytes_received += size
+
+    def _handle_mdns(self, mac: str, pkt, ts: float) -> None:
+        """An mDNS answer like 'Living-Room-TV.local is at <my own IP>' names the device."""
+        dns = pkt[DNS]
+        if not dns.qr or not pkt.haslayer(IP):
+            return
+        my_ip = pkt[IP].src
+        for rr in list(dns.an or []) + list(dns.ar or []):
+            if getattr(rr, "type", None) != 1 or getattr(rr, "rdata", None) != my_ip:
+                continue
+            name = (_decode(rr.rrname) or "").rstrip(".")
+            if name.lower().endswith(".local") and len(name) > len(".local"):
+                self._set_hostname(self.devices[mac], name[: -len(".local")], "mDNS", ts)
+                return
 
     # -------------------------------------------------------- presence
 
@@ -300,6 +367,13 @@ class DeviceTracker:
                 self._say(ts, "info", f"This Mac renewed its IP {bootp.yiaddr}", client)
             return
 
+        if (dev := self.devices.get(client)) and kind in ("Discover", "Request", "Inform"):
+            if vendor and vendor != dev.vendor_class:
+                dev.vendor_class = vendor
+                self._update_kind(dev)
+            if hostname:
+                self._set_hostname(dev, hostname, "DHCP", ts)
+
         label = self._label(client, hostname)
         if kind == "Discover":
             self.pending[client] = PendingJoin(client, ts, hostname=hostname, vendor_class=vendor)
@@ -332,7 +406,9 @@ class DeviceTracker:
             self.router_mac, self.router_ip = mac, ip or self.router_ip
             self._upsert(mac, ip, ts, role="router", found_by="DHCP server")
             self._say(ts, "info", f"Router identified: {ip} ({mac}) answers DHCP", mac)
-        elif mac != self.router_mac:
+        elif mac != self.router_mac and ts - self._warned.get(mac, float("-inf")) >= WARN_REPEAT:
+            # A second DHCP server answers every lease, so say it once, not once per packet.
+            self._warned[mac] = ts
             self._say(ts, "warn", f"DHCP reply from {ip} ({mac}), which is NOT the router - "
                                   "possible rogue DHCP server", mac)
 
