@@ -8,6 +8,8 @@ Routes:
                             event "state"   - devices, log, status
                             event "packets" - new packet rows since the last batch
     GET  /api/packet/<n>  all layers + hex dump of packet number n
+    GET  /api/device/<mac> one device with its traffic: rate, last-minute sparkline,
+                          protocols, conversations
     POST /api/scan        start an ARP scan
 
 It listens on 127.0.0.1 only, so nobody else on the Wi-Fi can open it.
@@ -16,6 +18,7 @@ It listens on 127.0.0.1 only, so nobody else on the Wi-Fi can open it.
 from __future__ import annotations
 
 import json
+import re
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -28,6 +31,7 @@ CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset
 HEARTBEAT = 2.0        # seconds; also refreshes counters in the UI
 BATCH_INTERVAL = 0.25  # group packets into ~4 updates per second
 BACKLOG = 500          # packets a newly opened page gets straight away
+MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
 
 
 def make_handler(engine: Engine):
@@ -66,6 +70,13 @@ def make_handler(engine: Engine):
                 detail = engine.packet_detail(int(route[len("/api/packet/"):]))
                 if detail is None:
                     self._json({"error": "That packet is no longer in the buffer"}, 404)
+                else:
+                    self._json(detail)
+            elif route.startswith("/api/device/"):
+                mac = route[len("/api/device/"):].lower()
+                detail = engine.device_detail(mac) if MAC_RE.match(mac) else None
+                if detail is None:
+                    self._json({"error": "Unknown device"}, 404)
                 else:
                     self._json(detail)
             else:

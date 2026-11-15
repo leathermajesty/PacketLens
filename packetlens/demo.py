@@ -9,7 +9,11 @@ It plays out on a fictional network 192.168.50.0/24:
     an mDNS query, the TV naming itself over mDNS, and an HTTP login to the router's admin page. Click that
     POST in the packet table: the password is readable, because HTTP isn't encrypted,
   * finally PacketLens (this Mac, .5) sends ARP check-ins: the TV answers, the
-    phone doesn't answer three in a row -> the phone has left the network.
+    phone doesn't answer three in a row -> the phone has left the network,
+  * meanwhile this Mac fetches something over HTTPS (traffic we always see in full)
+    and the iPad streams to the TV. Two other devices talking directly is only
+    visible here because this capture is made up: on real Wi-Fi that needs
+    monitor mode (Step 6).
 
 Write it to a file and open it in Wireshark to compare:
     python -m packetlens.demo samples/demo.pcap
@@ -30,6 +34,7 @@ from scapy.utils import wrpcap
 SUBNET = "192.168.50.0/24"
 ROUTER_IP, ROUTER_MAC = "192.168.50.1", "00:00:5e:00:53:01"  # documentation MAC (RFC 7042)
 SELF_IP, SELF_MAC = "192.168.50.5", "00:00:5e:00:53:05"      # the Mac running PacketLens
+ME = (SELF_IP, SELF_MAC)
 BCAST = "ff:ff:ff:ff:ff:ff"
 
 LAPTOP = ("192.168.50.10", "3c:22:fb:10:10:10")
@@ -104,6 +109,50 @@ def _web_session(client: tuple, server: tuple) -> list[tuple[float, object]]:
     ]
 
 
+def _tls_session(client: tuple, server: tuple, sport: int = 52000, chunks: int = 24):
+    """An HTTPS-looking exchange: handshake, a request, then a burst of data coming back."""
+    c, s = 3000, 9000
+    client_hello = b"\x16\x03\x01\x00\x40\x01" + bytes(0x3f)     # TLS handshake record
+    server_hello = b"\x16\x03\x03\x00\x40\x02" + bytes(0x3f)
+    app = lambda n: b"\x17\x03\x03" + n.to_bytes(2, "big") + bytes(n)  # noqa: E731 - application data
+    up = lambda t, flags, seq, ack, data=b"": (t, _ip(client, server) / TCP(  # noqa: E731
+        sport=sport, dport=443, flags=flags, seq=seq, ack=ack) / (Raw(data) if data else b""))
+    down = lambda t, flags, seq, ack, data=b"": (t, _ip(server, client) / TCP(  # noqa: E731
+        sport=443, dport=sport, flags=flags, seq=seq, ack=ack) / (Raw(data) if data else b""))
+    request = app(180)
+    pkts = [up(0.00, "S", c, 0), down(0.01, "SA", s, c + 1), up(0.02, "A", c + 1, s + 1),
+            up(0.03, "PA", c + 1, s + 1, client_hello),
+            down(0.08, "PA", s + 1, c + 1 + len(client_hello), server_hello),
+            up(0.10, "PA", c + 1 + len(client_hello), s + 1 + len(server_hello), request)]
+    seq_s = s + 1 + len(server_hello)
+    ack_c = c + 1 + len(client_hello) + len(request)
+    for i in range(chunks):                     # ~1.4 kB segments, a page or an update
+        data = app(1395)
+        pkts.append(down(0.20 + i * 0.18, "PA", seq_s, ack_c, data))
+        seq_s += len(data)
+        if i % 2:
+            pkts.append(up(0.21 + i * 0.18, "A", ack_c, seq_s))
+    pkts.append(up(0.30 + chunks * 0.18, "FA", ack_c, seq_s))
+    return pkts
+
+
+def _peer_stream(src: tuple, dst: tuple, dport: int = 7000, chunks: int = 16):
+    """One device sending data straight to another (an AirPlay-style stream)."""
+    sport, c, s = 49222, 4000, 8000
+    seg = lambda t, a, b, sp, dp, flags, seq, ack, data=b"": (t, _ip(a, b) / TCP(  # noqa: E731
+        sport=sp, dport=dp, flags=flags, seq=seq, ack=ack) / (Raw(data) if data else b""))
+    pkts = [seg(0.00, src, dst, sport, dport, "S", c, 0), seg(0.01, dst, src, dport, sport, "SA", s, c + 1),
+            seg(0.02, src, dst, sport, dport, "A", c + 1, s + 1)]
+    seq = c + 1
+    for i in range(chunks):
+        data = bytes(1200)
+        pkts.append(seg(0.10 + i * 0.15, src, dst, sport, dport, "PA", seq, s + 1, data))
+        seq += len(data)
+        if i % 3 == 2:
+            pkts.append(seg(0.11 + i * 0.15, dst, src, dport, sport, "A", s + 1, seq))
+    return pkts
+
+
 def build_demo_packets(start: float = 1_700_000_000.0) -> list:
     router = (ROUTER_IP, ROUTER_MAC)
     mdns = ("224.0.0.251", "01:00:5e:00:00:fb")
@@ -156,6 +205,12 @@ def build_demo_packets(start: float = 1_700_000_000.0) -> list:
         (42.0, _checkin(PHONE)),
         (48.0, _ip(TABLET, mdns) / UDP(sport=5353, dport=5353)
                / DNS(id=0, qd=DNSQR(qname="_companion-link._tcp.local", qtype="PTR"))),
+
+        # Traffic. This Mac over HTTPS via the router: we always see our own traffic in full.
+        *[(50.0 + t, pkt) for t, pkt in _tls_session(ME, router)],
+        # The iPad streaming to the TV: two other devices talking directly. Made-up captures
+        # can show this; on real Wi-Fi it takes monitor mode (Step 6).
+        *[(55.0 + t, pkt) for t, pkt in _peer_stream(TABLET, TV)],
     ]
     packets = []
     for offset, pkt in timeline:

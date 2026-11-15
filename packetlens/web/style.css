@@ -227,7 +227,23 @@ button.stat:hover { border-color: var(--existing); color: var(--text); }
 .topo-card .card-head { flex-wrap: wrap; }
 .topo-card .card-head h2 { margin-right: auto; }
 
-.link { stroke: var(--link); stroke-width: 2; stroke-dasharray: 5 5; }
+.link { stroke: var(--link); stroke-width: 2; stroke-dasharray: 5 5; transition: stroke-width .25s ease, opacity .25s ease; }
+.link.t1 { opacity: .9; stroke-width: 2.5; }
+.link.t2 { opacity: 1; stroke-width: 3.5; stroke: var(--existing); }
+.link.t3 { opacity: 1; stroke-width: 5; stroke: var(--existing); }
+.link.talking { opacity: 1; stroke: var(--step); animation: flow .5s linear infinite; }
+.link.origin-joined.talking { stroke: var(--joined); }
+.node.talking .body { stroke-width: 4.5; }
+.node.quiet.talking .body { stroke-width: 3; }
+.peer { fill: none; stroke: var(--step); stroke-width: 1.5; stroke-linecap: round; opacity: .8;
+        cursor: pointer; pointer-events: stroke; transition: opacity .3s; }
+.peer.t2 { stroke-width: 2.5; }
+.peer.t3 { stroke-width: 4; }
+.peer:hover { stroke-width: 5; }
+.swatch-line { width: 14px; height: 0; border-top: 3px solid var(--step); border-radius: 2px; }
+.busy-btn { font: inherit; font-size: 12px; color: var(--muted); background: none; border: 0; padding: 0;
+            cursor: pointer; white-space: nowrap; }
+.busy-btn:hover { color: var(--text); }
 .link.origin-joined { stroke: var(--joined); opacity: .7; }
 .link.fresh { opacity: 1; animation: flow .8s linear infinite; }
 .link.st-offline, .link.st-released { stroke: var(--faint); opacity: .25; animation: none; }
@@ -393,6 +409,20 @@ table.packets { width: 100%; border-collapse: collapse; table-layout: fixed; fon
 .dd-log li { grid-template-columns: 64px 10px 1fr; }
 .dd-log time { font-size: 11px; }
 .dd-note { margin: 10px 0 0; font-size: 11.5px; color: var(--faint); }
+.dd-rate b { font-size: 15px; }
+.dd-rate span { color: var(--muted); font-size: 12px; }
+.spark { width: 100%; height: 34px; display: block; margin: 6px 0 2px; }
+.spark rect { fill: var(--existing); opacity: .85; }
+.spark .base { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.dd-sub { font-size: 11.5px; color: var(--faint); margin: 0 0 4px; }
+.dd-protos { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 8px; font: 11px var(--mono); }
+.dd-peers { list-style: none; margin: 0; padding: 0; font-size: 12.5px; }
+.dd-peers li { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0;
+               border-bottom: 1px solid var(--panel-2); cursor: pointer; }
+.dd-peers li:hover { background: var(--panel-2); }
+.dd-peers .who { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dd-peers .how { color: var(--muted); font-family: var(--mono); font-size: 11.5px; white-space: nowrap; }
+.dd-traffic .empty { font-size: 12px; margin: 0; }
 
 /* ---------- toasts ---------- */
 .toasts { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 10; }

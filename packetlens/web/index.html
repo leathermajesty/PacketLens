@@ -16,7 +16,7 @@
               stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
       <span class="brand-name">PacketLens</span>
-      <span class="step-tag">Step 4 · Device details</span>
+      <span class="step-tag">Step 5 · Traffic</span>
     </div>
     <div class="stats" id="stats" aria-label="Network at a glance"></div>
     <div class="status" id="status"><span class="status-dot"></span><span id="status-text">Connecting…</span></div>
@@ -68,6 +68,7 @@
         <div class="card-head">
           <h2>Live topology</h2>
           <button id="topo-collapse" class="btn small" hidden title="Fold the quiet devices back into one bubble">Collapse</button>
+          <button id="topo-busy" class="busy-btn" hidden title="Click to open this device"></button>
           <ul class="legend">
             <li><span class="swatch router"></span>Router</li>
             <li><span class="swatch self"></span>You</li>
@@ -75,6 +76,7 @@
             <li title="Seen joining via DHCP"><span class="swatch joined"></span>Joined</li>
             <li title="Stopped answering ARP check-ins, or sent a DHCP Release"><span class="swatch offline"></span>Offline</li>
             <li title="Quietly connected devices, folded into one bubble - click it to expand"><span class="swatch group"></span>Grouped</li>
+            <li title="Links flash when a device talks and thicken with volume; a thin curve joins two devices talking to each other"><span class="swatch-line"></span>Traffic</li>
           </ul>
         </div>
         <svg id="topo" role="img" aria-label="Network topology"></svg>

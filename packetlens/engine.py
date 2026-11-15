@@ -17,6 +17,7 @@ from .netinfo import NetworkInfo, read_arp_table
 from .packets import dissect, summarize
 from .scanner import arp_scan, send_arp_checkins
 from .tracker import DeviceTracker
+from .traffic import TrafficStats
 
 BUFFER_SIZE = 2000    # packets kept in memory for the table and the detail view
 MAX_REPLAY_GAP = 3.0  # don't wait longer than this between replayed packets
@@ -46,6 +47,7 @@ class Engine:
         self._t0: float | None = None
         self.tracker = DeviceTracker(router_ip=net.gateway_ip, router_mac=net.gateway_mac,
                                      self_ip=net.ip, self_mac=net.mac, subnet=net.cidr)
+        self.traffic = TrafficStats()     # who talks how much, and with whom
         self.capture = {"running": False, "error": None, "packets": 0, "finished": False,
                         "filter": self.capture_filter or "", "decode_errors": 0,
                         "buffer": BUFFER_SIZE}
@@ -84,6 +86,8 @@ class Engine:
                     self.version += 1
             except Exception:  # noqa: BLE001
                 self.capture["decode_errors"] += 1
+            self.traffic.note(ts, summary["src_mac"], summary["dst_mac"], summary["length"],
+                              summary["proto"], self.tracker.devices)
             self.cond.notify_all()
 
     def packets_since(self, after: int, limit: int = 500) -> list[dict]:
@@ -104,6 +108,15 @@ class Engine:
                 return None
             summary, pkt = self.packets[idx]
         return {"summary": summary, **dissect(pkt)}
+
+    def device_detail(self, mac: str) -> dict | None:
+        """One device with its traffic figures (the details panel). None if unknown."""
+        with self.cond:
+            dev = self.tracker.devices.get(mac)
+            if dev is None:
+                return None
+            now = self.tracker.clock or time.time()
+            return {**dev.to_dict(), "traffic": self.traffic.device(mac, now)}
 
     # ------------------------------------------------------------- capture
 
@@ -219,6 +232,12 @@ class Engine:
 
     def snapshot(self) -> dict:
         with self.cond:
+            tracked = self.tracker.snapshot()
+            now = tracked["clock"] or time.time()     # packet time when replaying, wall time live
+            self.traffic.prune(now)
+            rates = self.traffic.rates(now)
+            for d in tracked["devices"]:
+                d["pps"], d["bps"] = rates.get(d["mac"], (0, 0))
             return {
                 "version": self.version,
                 "source": self.source,
@@ -228,5 +247,6 @@ class Engine:
                 "capture": dict(self.capture),
                 "scan": dict(self.scan),
                 "presence": dict(self.presence),
-                **self.tracker.snapshot(),
+                "conversations": self.traffic.conversations(now),
+                **tracked,
             }

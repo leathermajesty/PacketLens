@@ -94,6 +94,32 @@ an unusual port shows as plain TCP/UDP. Wireshark does deeper detection.
 **Try the demo:** run `--demo`, click the `POST /login` HTTP packet, and read the password in
 the payload. That's why router admin pages (and everything else) should use HTTPS.
 
+### Traffic on the topology
+
+- **Links flash** the moment a device sends or receives a packet. Devices folded into the
+  bubble flash the bubble's link, so you can see the crowd chattering without unfolding it.
+- **Link thickness** follows how much a device has talked in the last 10 seconds: thin under
+  200 B/s, thicker and brighter above 2 kB/s and 20 kB/s.
+- **A thin curve between two devices** means they talked to each other directly in the last
+  30 seconds (IP traffic, not ARP). Hover it for bytes and protocols; click it to open the
+  other device.
+- **Busiest: …** in the topology header names the device with the most traffic right now
+  (this Mac and the router are left out: they'd always win). Click it to open the device.
+- **Device details → Traffic:** the rate now, a 60-second sparkline, the protocol mix, and
+  **Talks with**, the list of devices it had conversations with. Click one to jump to it.
+
+What your Mac can and can't see on Wi-Fi, which explains the numbers:
+
+| Traffic | Seen? |
+|---|---|
+| Anything to or from this Mac | Yes, completely |
+| Broadcasts and multicasts from any device (ARP, DHCP, mDNS, SSDP, NetBIOS…) | Yes |
+| Another device talking to the router or the internet | No |
+| Two other devices talking to each other | No - unless it's a made-up or monitor-mode capture |
+
+So in the demo, the iPad streaming to the TV draws a curve; on your real Wi-Fi you'd only see
+that in monitor mode (Step 6). Rates and bytes for other devices are a floor, not the truth.
+
 ### Finding devices that are already connected
 
 1. **ARP cache:** devices your Mac has recently talked to (`arp -an`). Passive.
@@ -207,12 +233,13 @@ packetlens/
   scanner.py    ARP scan of the subnet, ARP check-ins
   tracker.py    the device list: "joined with an IP" rule, presence, names, IP history
   vendors.py    MAC vendor lookup (OUI) and "looks like" guesses
+  traffic.py    per-device rates, protocol mix and conversations (who talks to whom)
   packets.py    packet table rows + Wireshark-style layer details and hex dump
   engine.py     live capture / replay, packet buffer, feeds the tracker
   server.py     local web server + live updates
   demo.py       made-up example network
   web/          dashboard (HTML, CSS, JS - no internet needed)
-tests/          unit tests (device tracker, packet decoding)
+tests/          unit tests (device tracker, packet decoding, traffic stats)
 samples/        demo capture
 ```
 
@@ -230,7 +257,8 @@ Run the tests:
 - [x] **Step 4:** device details on click: vendor, announced name (DHCP/mDNS), type guess,
   first/last seen, IP history, packet counts, nicknames; dashboard that scales to hundreds of
   devices (grouped topology, search/filter, stats, alerts tab, theme)
-- [ ] **Step 5:** traffic on the topology (links flash when devices talk, busiest devices)
+- [x] **Step 5:** traffic on the topology: links flash and thicken, curves between devices
+  talking to each other, busiest device, per-device sparkline / protocol mix / conversations
 - [ ] **Step 6:** monitor mode: the WPA2 4-way handshake ("device entered the right password")
   and deauthentication frames ("device disconnected" - or a deauth attack)
 - [ ] **Step 7:** attack detection: ARP spoofing, port scans, rogue DHCP

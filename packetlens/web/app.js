@@ -63,6 +63,24 @@ function fmtBytes(n) {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function fmtRate(bps) {
+  return `${fmtBytes(Math.round(bps))}/s`;
+}
+
+// 0 = quiet, 1 = some, 2 = busy, 3 = heavy - drives link thickness on the topology
+function trafficLevel(bps) {
+  return bps >= 20480 ? 3 : bps >= 2048 ? 2 : bps >= 200 ? 1 : 0;
+}
+
+function isGroupAddress(mac) {
+  return (parseInt(mac.slice(0, 2), 16) & 1) === 1;   // broadcast or multicast
+}
+
+function nameOf(s, mac) {
+  const d = s.devices.find((x) => x.mac === mac);
+  return d ? deviceName(d) : mac;
+}
+
 function deviceName(d) {
   if (nicknames[d.mac]) return nicknames[d.mac];
   if (d.role === "router") return d.hostname || "Router";
@@ -288,9 +306,12 @@ function setDeviceFilter(filter) {
 const topo = {
   svg: $("topo"),
   links: svgEl("g"),
+  peers: svgEl("g"),    // curves between two devices talking to each other
   nodes: svgEl("g"),
   hint: svgEl("text", { class: "topo-hint", "text-anchor": "middle" }),
   items: new Map(),     // key -> {g, line, x, y, tx, ty, ...}
+  edges: new Map(),     // "a|b" -> {path, title, a, b}
+  grouped: new Set(),   // MACs currently folded into the bubble
   routerKey: null,
   devices: [],
   expanded: false,      // big networks: quiet devices are folded into one bubble until clicked
@@ -335,7 +356,7 @@ function groupNode(grouped) {
   const parts = [[n("online"), "online"], [n("idle"), "idle"], [n("offline", "released"), "offline"]]
     .filter(([c]) => c).map(([c, w]) => `${c} ${w}`);
   return { mac: GROUP_KEY, role: "group", origin: "existing", status: "online", count: grouped.length,
-           summary: parts.join(" · ") };
+           summary: parts.join(" · "), bps: grouped.reduce((a, d) => a + (d.bps || 0), 0) };
 }
 
 function setRadius(it, r) {
@@ -347,7 +368,7 @@ function setRadius(it, r) {
   it.sub.setAttribute("y", r + 30);
   it.inner.style.display = r < 14 ? "none" : "";   // no room for the ".23" inside small dots
 }
-topo.svg.append(topo.links, topo.nodes, topo.hint);
+topo.svg.append(topo.links, topo.peers, topo.nodes, topo.hint);
 
 function makeItem(d, from) {
   const g = svgEl("g", { class: "node" });
@@ -438,7 +459,7 @@ function styleItem(it) {
   const quiet = !topo.labels && !notable(d);
   const state = `role-${d.role} origin-${d.origin} st-${d.status}${isFresh(d.mac) ? " fresh" : ""}`;
   it.g.setAttribute("class", `node ${state}${quiet ? " quiet" : ""}${topo.hl.has(d.mac) ? " hl" : ""}`);
-  it.line.setAttribute("class", `link ${state}`);
+  it.line.setAttribute("class", `link ${state} t${trafficLevel(d.bps || 0)}`);
 }
 
 function renderTopology(s) {
@@ -447,6 +468,7 @@ function renderTopology(s) {
   topo.routerKey = router.mac;
   topo.clock = s.clock;
   const { shown, grouped } = topoPartition(s);
+  topo.grouped = new Set(grouped.map((d) => d.mac));
   // The bubble goes first so it lands at the top of the outer ring.
   topo.devices = [router, ...(grouped.length ? [groupNode(grouped)] : []), ...shown];
   $("topo-collapse").hidden = !(topo.expanded && s.devices.length - 1 > GROUP_ABOVE);
@@ -496,6 +518,85 @@ function renderTopology(s) {
     : "Click a device for its details";
   highlight(currentHighlight());   // setAttribute("class") above dropped the highlight
   relayout();
+  renderTraffic(s);
+}
+
+// ----------------------------------------------------------------- traffic
+
+// Rates change without a version bump, so this runs on every state event: link thickness,
+// the "busiest" line and the curves between devices that are talking to each other.
+function renderTraffic(s) {
+  for (const d of s.devices) {
+    const it = topo.items.get(d.mac);
+    if (it) { it.d = d; styleItem(it); }
+  }
+  const g = topo.items.get(GROUP_KEY);
+  if (g) {
+    g.d.bps = s.devices.filter((d) => topo.grouped.has(d.mac)).reduce((a, d) => a + (d.bps || 0), 0);
+    styleItem(g);
+  }
+  renderEdges(s);
+  tick();
+
+  const busy = s.devices.filter((d) => d.role === "device" && d.bps >= 1024).sort((a, b) => b.bps - a.bps);
+  const btn = $("topo-busy");
+  btn.hidden = !busy.length;
+  if (busy.length) {
+    btn.textContent = `Busiest: ${deviceName(busy[0])} · ${fmtRate(busy[0].bps)}`;
+    btn.title = busy.slice(0, 3).map((d) => `${deviceName(d)} · ${fmtRate(d.bps)}`).join("\n") + "\nClick to open";
+    btn.onclick = () => selectDevice(busy[0].mac);
+  }
+}
+
+function renderEdges(s) {
+  const present = new Set();
+  for (const c of s.conversations || []) {
+    if (c.a === topo.routerKey || c.b === topo.routerKey) continue;   // the router link shows that
+    if (!topo.items.has(c.a) || !topo.items.has(c.b)) continue;       // one end is folded away
+    const key = `${c.a}|${c.b}`;
+    present.add(key);
+    let e = topo.edges.get(key);
+    if (!e) {
+      e = { path: svgEl("path", { class: "peer" }), title: svgEl("title"), a: c.a, b: c.b };
+      e.path.append(e.title);
+      e.path.addEventListener("click", () => selectDevice(view.deviceMac === c.a ? c.b : c.a));
+      topo.peers.append(e.path);
+      topo.edges.set(key, e);
+    }
+    const age = Math.max(0, s.clock - c.last);
+    const level = c.bytes >= 200_000 ? 3 : c.bytes >= 20_000 ? 2 : 1;
+    e.path.setAttribute("class", `peer t${level}`);
+    e.path.style.opacity = (1 - (age / 30) * 0.7).toFixed(2);
+    e.title.textContent = `${nameOf(s, c.a)} ↔ ${nameOf(s, c.b)}\n${fmtBytes(c.bytes)} in ${c.packets} packets` +
+      ` · ${c.protocols.join(", ")}\nlast ${ago(age)} · click to open`;
+  }
+  for (const [key, e] of topo.edges) {
+    if (!present.has(key)) { e.path.remove(); topo.edges.delete(key); }
+  }
+}
+
+// Flash the link of every device that appears in a batch of packets (instant, from the
+// packet stream). Devices folded into the bubble flash the bubble's link.
+const flashTimers = new Map();
+
+function flashTraffic(batch) {
+  const macs = new Set();
+  for (const p of batch) {
+    if (p.src_mac) macs.add(p.src_mac);
+    if (p.dst_mac && !isGroupAddress(p.dst_mac)) macs.add(p.dst_mac);
+  }
+  for (const mac of macs) {
+    const key = topo.items.has(mac) ? mac : topo.grouped.has(mac) ? GROUP_KEY : null;
+    const it = key && topo.items.get(key);
+    if (!it) continue;
+    it.g.classList.add("talking");
+    it.line.classList.add("talking");
+    clearTimeout(flashTimers.get(key));
+    flashTimers.set(key, setTimeout(() => {
+      it.g.classList.remove("talking");
+      it.line.classList.remove("talking");
+    }, 500));
+  }
 }
 
 function relayout() {
@@ -546,6 +647,24 @@ function tick() {
       it.line.setAttribute("x1", r.x); it.line.setAttribute("y1", r.y);
       it.line.setAttribute("x2", it.x); it.line.setAttribute("y2", it.y);
     }
+  }
+  const cx = r ? r.x : topo.w / 2;
+  const cy = r ? r.y : topo.h / 2;
+  for (const e of topo.edges.values()) {
+    const A = topo.items.get(e.a);
+    const B = topo.items.get(e.b);
+    if (!A || !B) continue;
+    // A curve that bows away from the router, so it doesn't run along the spokes.
+    const mx = (A.x + B.x) / 2;
+    const my = (A.y + B.y) / 2;
+    const d = Math.hypot(B.x - A.x, B.y - A.y) || 1;
+    let vx = mx - cx;
+    let vy = my - cy;
+    const vl = Math.hypot(vx, vy);
+    if (vl < 1) { vx = -(B.y - A.y) / d; vy = (B.x - A.x) / d; } else { vx /= vl; vy /= vl; }
+    const bulge = Math.min(70, d * 0.35);
+    e.path.setAttribute("d", `M${A.x.toFixed(1)},${A.y.toFixed(1)} Q${(mx + vx * bulge).toFixed(1)},`
+      + `${(my + vy * bulge).toFixed(1)} ${B.x.toFixed(1)},${B.y.toFixed(1)}`);
   }
   if (p < 1) scheduleTick();
   else clearTimeout(topo.fallback);
@@ -893,6 +1012,82 @@ function section(title, ...children) {
   return sec;
 }
 
+const trafficView = { mac: null, data: null, fetchedAt: 0, pending: false };
+
+async function refreshTraffic(mac) {
+  if (trafficView.pending) return;
+  trafficView.pending = true;
+  try {
+    const res = await fetch(`/api/device/${mac}`);
+    if (!res.ok) throw new Error("unknown device");
+    const d = await res.json();
+    trafficView.mac = mac;
+    trafficView.data = d.traffic;
+    trafficView.fetchedAt = Date.now();
+    if (view.deviceMac === mac && lastState) renderDeviceDetail(lastState);
+  } catch { /* the panel keeps saying "loading" */ } finally {
+    trafficView.pending = false;
+  }
+}
+
+function sparkline(series) {
+  const w = series.length;
+  const svg = svgEl("svg", { class: "spark", viewBox: `0 0 ${w} 24`, preserveAspectRatio: "none" });
+  svg.append(svgEl("line", { class: "base", x1: 0, y1: 23.5, x2: w, y2: 23.5 }));
+  const max = Math.max(...series, 1);
+  series.forEach((v, i) => {
+    if (!v) return;
+    const h = Math.max(1, (v / max) * 23);
+    svg.append(svgEl("rect", { x: i + 0.15, y: 23 - h, width: 0.7, height: h }));
+  });
+  return svg;
+}
+
+function trafficSection(d, s) {
+  const t = trafficView.mac === d.mac ? trafficView.data : null;
+  const box = el("div", "dd-traffic");
+  if (!t) {
+    box.append(el("p", "empty", "Loading…"));
+    return section("Traffic", box);
+  }
+  const rate = el("div", "dd-rate");
+  rate.append(el("b", null, fmtRate(t.rate.bps)),
+              el("span", null, ` now · ${t.rate.pps} pkt/s · peak ${fmtRate(t.peak_bps)} in the last minute`));
+  box.append(rate, sparkline(t.series), el("p", "dd-sub", "Last 60 seconds, sent + received"));
+
+  const protocols = t.protocols.filter((p) => p.share >= 1);   // skip the 0% long tail
+  if (protocols.length) {
+    const protos = el("div", "dd-protos");
+    for (const p of protocols) {
+      const chip = el("span", `proto ${protoClass(p.proto)}`, `${p.proto} ${p.share}%`);
+      chip.title = `${p.packets} packets · ${fmtBytes(p.bytes)}`;
+      protos.append(chip);
+    }
+    box.append(protos);
+  }
+
+  const peersTitle = el("p", "dd-sub", t.peers.length ? `Talks with (${t.conversations})` : "Talks with");
+  box.append(peersTitle);
+  if (!t.peers.length) {
+    box.append(el("p", "empty", d.role === "self"
+      ? "No conversations yet."
+      : "No conversations seen. On Wi-Fi this Mac sees other devices' broadcasts and multicasts, " +
+        "not who they talk to."));
+  } else {
+    const ol = el("ol", "dd-peers");
+    for (const p of t.peers) {
+      const li = el("li");
+      li.title = `${fmtBytes(p.sent)} sent · ${fmtBytes(p.received)} received · ${p.protocols.join(", ")}`;
+      li.append(el("span", "who", nameOf(s, p.mac)),
+                el("span", "how", `${fmtBytes(p.bytes)} · ${ago(Math.max(0, s.clock - p.last))}`));
+      li.addEventListener("click", () => selectDevice(p.mac));
+      ol.append(li);
+    }
+    box.append(ol);
+  }
+  return section("Traffic", box);
+}
+
 function renderDeviceDetail(s) {
   const box = $("device-detail");
   if (view.tab === "device") updateHint();
@@ -971,8 +1166,10 @@ function renderDeviceDetail(s) {
     ol.append(li);
   }
 
+  if (trafficView.mac !== d.mac || Date.now() - trafficView.fetchedAt > 1800) refreshTraffic(d.mac);
   const grid = el("div", "dd-grid");
-  grid.append(section("Who is it?", identity), section("Activity", activity), section("History", ol));
+  grid.append(section("Who is it?", identity), trafficSection(d, s), section("Activity", activity),
+              section("History", ol));
   const note = el("p", "dd-note",
     d.role === "self" ? "This is the computer PacketLens is capturing on."
       : "On Wi-Fi your Mac only receives broadcasts and traffic addressed to it, so this " +
@@ -1085,7 +1282,10 @@ function apply(s) {
   renderStats(s);
   renderDevices(s);                    // every update: keeps "seen 12s ago" fresh
   renderDeviceDetail(s);
-  if (s.version === lastVersion) return;
+  if (s.version === lastVersion) {
+    renderTraffic(s);
+    return;
+  }
   lastVersion = s.version;
   detectJoins(s);
   renderWifi(s);
@@ -1099,6 +1299,7 @@ function connect() {
   es.addEventListener("packets", (e) => {
     const batch = JSON.parse(e.data);
     notePackets(batch.length);
+    flashTraffic(batch);
     addPackets(batch);
   });
   es.onerror = () => {
